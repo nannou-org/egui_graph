@@ -36,6 +36,27 @@ pub struct EdgeResponse {
     closest_point: egui::Pos2,
 }
 
+/// The resolved inputs for painting an edge, handed to the closure given to
+/// [`Edge::show_with`].
+///
+/// All coordinates share the layer-local space of the edge's sockets.
+#[non_exhaustive]
+pub struct EdgePaintCtx<'a> {
+    /// The edge's piecewise-cubic bezier path.
+    pub path: &'a bezier::Path,
+    /// The path flattened at the edge's distance-per-point, ready for
+    /// [`egui::Shape::line`].
+    pub points: &'a [egui::Pos2],
+    /// Whether the edge is currently selected.
+    pub selected: bool,
+    /// Whether the edge is hover-highlighted, including the highlight shown
+    /// while a pending selection rectangle covers the edge.
+    pub hovered: bool,
+    /// The stroke default painting would use for the current state, with the
+    /// per-edge stroke overrides applied and falling back to the egui visuals.
+    pub stroke: egui::Stroke,
+}
+
 /// An index of a node's input or output socket.
 pub type SocketIx = usize;
 /// An index of a node's input socket.
@@ -130,6 +151,25 @@ impl<'a> Edge<'a> {
 
     /// Process any user interaction with the edge and present it.
     pub fn show(self, ectx: &mut EdgesCtx, ui: &mut egui::Ui) -> EdgeResponse {
+        self.show_with(ectx, ui, |ui, cx| {
+            ui.painter()
+                .add(egui::Shape::line(cx.points.to_vec(), cx.stroke));
+        })
+    }
+
+    /// As [`Edge::show`], but painting the edge via `paint` instead of the
+    /// default solid line.
+    ///
+    /// Interaction (hover, selection, deletion) is identical to [`Edge::show`].
+    /// The `paint` closure receives the resolved paint inputs - see
+    /// [`EdgePaintCtx`]. It is not called when either socket position is
+    /// unavailable, in which case there is nothing to paint.
+    pub fn show_with(
+        self,
+        ectx: &mut EdgesCtx,
+        ui: &mut egui::Ui,
+        paint: impl FnOnce(&mut egui::Ui, EdgePaintCtx),
+    ) -> EdgeResponse {
         let Self {
             edge: ((a, output), (b, input)),
             waypoints,
@@ -227,14 +267,24 @@ impl<'a> Edge<'a> {
 
         // Paint the edge.
         let pts: Vec<_> = path.flatten(distance_per_point).collect();
+        let hovered = show_hover || (under_selection_rect && ui.input(|i| i.modifiers.shift));
         let stroke = if *selected {
             selected_stroke.unwrap_or(ui.style().visuals.selection.stroke)
-        } else if show_hover || (under_selection_rect && ui.input(|i| i.modifiers.shift)) {
+        } else if hovered {
             hovered_stroke.unwrap_or(ui.style().visuals.widgets.hovered.fg_stroke)
         } else {
             stroke.unwrap_or(ui.style().visuals.widgets.noninteractive.fg_stroke)
         };
-        ui.painter().add(egui::Shape::line(pts, stroke));
+        paint(
+            ui,
+            EdgePaintCtx {
+                path: &path,
+                points: &pts,
+                selected: *selected,
+                hovered,
+                stroke,
+            },
+        );
 
         // Construct and return the response.
         let changed = old_selected != *selected;
