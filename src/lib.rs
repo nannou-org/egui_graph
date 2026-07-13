@@ -15,6 +15,7 @@ pub mod edge;
 #[cfg(feature = "layout")]
 pub mod layout;
 pub mod node;
+pub mod paint;
 pub mod socket;
 
 /// The main interface for the `Graph` widget.
