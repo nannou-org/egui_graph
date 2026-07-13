@@ -1,6 +1,6 @@
 [package]
 name = "egui_graph"
-version = "0.16.1"
+version = "0.16.2"
 edition = "2021"
 description = "A general-purpose node graph widget for egui."
 license = "MIT"
