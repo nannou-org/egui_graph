@@ -66,6 +66,14 @@ pub struct FramedResponse<T> {
     pub sockets: crate::SocketLayout,
 }
 
+/// The response returned by [`Node::show_static`].
+pub struct StaticNodeResponse<T> {
+    /// The framed content's response.
+    pub inner: egui::InnerResponse<T>,
+    /// The hover response of each socket.
+    pub sockets: SocketResponses,
+}
+
 /// Events related to the creation of an edge to or from a node.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum EdgeEvent {
@@ -203,6 +211,104 @@ impl Node {
         self.show_impl(ctx, ui, Box::new(content) as Box<_>)
     }
 
+    /// Show the node as a static widget at the ui cursor, outside any graph.
+    ///
+    /// The frame and sockets paint exactly as within a
+    /// [`Graph`](crate::Graph), but there is no layout, selection, dragging
+    /// or edge interaction. `content` must call [`NodeCtx::framed`] or
+    /// [`NodeCtx::framed_with`], as within a graph. The socket responses
+    /// sense hover only, for tooltips.
+    pub fn show_static<R>(
+        self,
+        ui: &mut egui::Ui,
+        content: impl FnOnce(NodeCtx<'_>) -> FramedResponse<R>,
+    ) -> StaticNodeResponse<R> {
+        let (min_size, content_min_size, socket_padding) = self.min_sizes(ui);
+        let max_w = self.max_width.unwrap_or(ui.spacing().text_edit_width);
+        let put_size = egui::Vec2::new(max_w, min_size.y);
+        let put_rect = egui::Rect::from_min_size(ui.cursor().min, put_size);
+        let graph_id = ui.id();
+        let egui_id = egui_id(graph_id, self.id);
+        let (socket_layer, frame_layer) = sublayers(ui, egui_id);
+
+        let builder = egui::UiBuilder::new()
+            .max_rect(put_rect)
+            .layer_id(frame_layer);
+        let inner_response = ui.scope_builder(builder, |ui| {
+            let node_ctx = NodeCtx {
+                ui,
+                interaction: NodeInteraction::default(),
+                min_size: content_min_size,
+                graph_id,
+                node_id: self.id,
+                immutable: false,
+                flow: self.flow,
+                inputs: self.inputs,
+                outputs: self.outputs,
+            };
+            content(node_ctx)
+        });
+        let FramedResponse {
+            inner,
+            sockets: socket_layout,
+        } = inner_response.inner;
+
+        let rect = inner.response.rect;
+        let node_sockets = socket_layout.resolve(self.flow, rect, socket_padding);
+        let socket_color = self.socket_color.unwrap_or(ui.visuals().text_color());
+        let sockets = crate::socket::paint(
+            ui,
+            egui_id,
+            socket_layer,
+            rect,
+            &node_sockets,
+            socket_color,
+            self.socket_radius,
+            |_, _| false,
+        );
+        StaticNodeResponse { inner, sockets }
+    }
+
+    /// The minimum frame size that fits the sockets, the minimum content
+    /// size within the frame's corner radius, and the socket padding.
+    fn min_sizes(&self, ui: &egui::Ui) -> (egui::Vec2, egui::Vec2, f32) {
+        // The window should always be at least the interaction size.
+        let min_item_spacing = ui.spacing().item_spacing.x.min(ui.spacing().item_spacing.y);
+        let min_interact_len = ui
+            .spacing()
+            .interact_size
+            .x
+            .min(ui.spacing().interact_size.y);
+        let mut min_size = egui::Vec2::splat(min_interact_len);
+        // However, it should also always be at least large enough to comfortably show all
+        // inlets/outlets.
+        let max_sockets = std::cmp::max(self.inputs, self.outputs);
+        let min_socket_gap = min_interact_len + min_item_spacing;
+        let win_corner_radius = ui.visuals().window_corner_radius.ne as f32;
+        let socket_padding = crate::socket::socket_padding(ui.style());
+        if max_sockets > 1 {
+            let socket_gap_factor = if self.collapsed {
+                Self::COLLAPSED_SOCKET_GAP_FACTOR
+            } else {
+                1.0
+            };
+            let min_len = (max_sockets - 1) as f32 * min_socket_gap * socket_gap_factor
+                + socket_padding * 2.0;
+            match self.flow {
+                egui::Direction::LeftToRight | egui::Direction::RightToLeft => {
+                    min_size.y = min_size.y.max(min_len);
+                }
+                egui::Direction::TopDown | egui::Direction::BottomUp => {
+                    min_size.x = min_size.x.max(min_len);
+                }
+            }
+        }
+        // The content accounts for the frame corner radius.
+        let gap = egui::Vec2::splat(win_corner_radius * 2.0);
+        let content_min_size = min_size - gap;
+        (min_size, content_min_size, socket_padding)
+    }
+
     fn show_impl<'a, R>(
         self,
         ctx: &mut NodesCtx,
@@ -253,37 +359,7 @@ impl Node {
             egui::Pos2::new(x, y)
         };
 
-        // The window should always be at least the interaction size.
-        let min_item_spacing = ui.spacing().item_spacing.x.min(ui.spacing().item_spacing.y);
-        let min_interact_len = ui
-            .spacing()
-            .interact_size
-            .x
-            .min(ui.spacing().interact_size.y);
-        let mut min_size = egui::Vec2::splat(min_interact_len);
-        // However, it should also always be at least large enough to comfortably show all
-        // inlets/outlets.
-        let max_sockets = std::cmp::max(self.inputs, self.outputs);
-        let min_socket_gap = min_interact_len + min_item_spacing;
-        let win_corner_radius = ui.visuals().window_corner_radius.ne as f32;
-        let socket_padding = crate::socket::socket_padding(ui.style());
-        if max_sockets > 1 {
-            let socket_gap_factor = if self.collapsed {
-                Self::COLLAPSED_SOCKET_GAP_FACTOR
-            } else {
-                1.0
-            };
-            let min_len = (max_sockets - 1) as f32 * min_socket_gap * socket_gap_factor
-                + socket_padding * 2.0;
-            match self.flow {
-                egui::Direction::LeftToRight | egui::Direction::RightToLeft => {
-                    min_size.y = min_size.y.max(min_len);
-                }
-                egui::Direction::TopDown | egui::Direction::BottomUp => {
-                    min_size.x = min_size.x.max(min_len);
-                }
-            }
-        }
+        let (min_size, content_min_size, socket_padding) = self.min_sizes(ui);
 
         let max_w = self.max_width.unwrap_or(ui.spacing().text_edit_width);
         let max_size = egui::Vec2::new(max_w, ctx.graph_rect.height());
@@ -325,31 +401,13 @@ impl Node {
             (selected, in_selection_rect)
         };
 
-        // Calculate the minimum size for the content (accounting for frame corner radius).
-        let gap = egui::Vec2::splat(win_corner_radius * 2.0);
-        let content_min_size = min_size - gap;
-
         // Custom framed node container that remains in the scene's layer
         let put_size = egui::Vec2::new(max_size.x, min_size.y);
         let put_rect = egui::Rect::from_min_size(pos_graph, put_size);
 
-        let scene_layer = ui.layer_id();
         let node_id = self.id;
         let egui_id = egui_id(ctx.graph_id, node_id);
-
-        // Socket layer below the frame so node content takes interaction precedence.
-        let socket_layer = egui::LayerId::new(scene_layer.order, egui_id.with("sockets"));
-        ui.ctx().set_sublayer(scene_layer, socket_layer);
-        if let Some(transform) = ui.ctx().layer_transform_to_global(scene_layer) {
-            ui.ctx().set_transform_layer(socket_layer, transform);
-        }
-
-        // Frame layer on top.
-        let frame_layer = egui::LayerId::new(scene_layer.order, egui_id);
-        ui.ctx().set_sublayer(scene_layer, frame_layer);
-        if let Some(transform) = ui.ctx().layer_transform_to_global(scene_layer) {
-            ui.ctx().set_transform_layer(frame_layer, transform);
-        }
+        let (socket_layer, frame_layer) = sublayers(ui, egui_id);
 
         // A `Ui` scope for the node's layer.
         let builder = egui::UiBuilder::new()
@@ -732,6 +790,22 @@ impl<'a> NodeCtx<'a> {
     }
 }
 
+/// Register the node's two sublayers of the ui's layer: the socket layer
+/// below the frame layer, so node content takes interaction precedence.
+/// Both follow the ui layer's transform.
+fn sublayers(ui: &egui::Ui, egui_id: egui::Id) -> (egui::LayerId, egui::LayerId) {
+    let parent = ui.layer_id();
+    let socket_layer = egui::LayerId::new(parent.order, egui_id.with("sockets"));
+    let frame_layer = egui::LayerId::new(parent.order, egui_id);
+    for layer in [socket_layer, frame_layer] {
+        ui.ctx().set_sublayer(parent, layer);
+        if let Some(transform) = ui.ctx().layer_transform_to_global(parent) {
+            ui.ctx().set_transform_layer(layer, transform);
+        }
+    }
+    (socket_layer, frame_layer)
+}
+
 /// The default frame styling used for the `Node`'s `Window`.
 ///
 /// This applies selection styling based on the `NodeInteraction` state:
@@ -754,4 +828,45 @@ pub fn default_frame(style: &egui::Style, interaction: NodeInteraction) -> egui:
     }
 
     frame
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A static node paints outside any graph and yields a hover response
+    /// per socket. Inputs sit on the frame's top edge in index order and
+    /// outputs on its bottom edge.
+    #[test]
+    fn static_node_paints_sockets_on_the_frame() {
+        let ctx = egui::Context::default();
+        let mut out = None;
+        // Two passes, since fonts and sizes settle after the first.
+        for _ in 0..2 {
+            let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+                let res = Node::from_id(NodeId(0))
+                    .inputs(2)
+                    .outputs(1)
+                    .flow(egui::Direction::TopDown)
+                    .show_static(ui, |c| c.framed(|ui, _| ui.label("x")));
+                let rect = res.inner.response.rect;
+                let inputs: Vec<egui::Pos2> =
+                    res.sockets.inputs().map(|(_, r)| r.rect.center()).collect();
+                let outputs: Vec<egui::Pos2> = res
+                    .sockets
+                    .outputs()
+                    .map(|(_, r)| r.rect.center())
+                    .collect();
+                out = Some((rect, inputs, outputs));
+            });
+        }
+        let (rect, inputs, outputs) = out.expect("the panel ran");
+        assert_eq!(inputs.len(), 2);
+        assert_eq!(outputs.len(), 1);
+        for pos in &inputs {
+            assert!((pos.y - rect.top()).abs() < 1e-3, "{pos:?} off {rect:?}");
+        }
+        assert!((outputs[0].y - rect.bottom()).abs() < 1e-3);
+        assert!(inputs[0].x < inputs[1].x);
+    }
 }

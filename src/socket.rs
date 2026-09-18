@@ -166,27 +166,42 @@ pub(crate) fn show(
         (None, None)
     };
 
-    // Phase B: Paint and interact with each socket on the pre-created socket layer.
+    let paint_highlight =
+        |kind, ix| pressed_socket == Some((kind, ix)) || closest_socket == Some((kind, ix));
+    paint(
+        ui,
+        egui_id,
+        socket_layer,
+        frame_rect,
+        node_sockets,
+        socket_color,
+        socket_radius,
+        paint_highlight,
+    )
+}
+
+/// Paint each socket on `socket_layer` and allocate its hover response.
+///
+/// `highlight` names the sockets that get the larger, faded semicircle
+/// behind them, such as a pressed socket or the closest one to the pointer
+/// while an edge is in progress. This is the graph-free half of [`show`].
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn paint(
+    ui: &mut egui::Ui,
+    egui_id: egui::Id,
+    socket_layer: egui::LayerId,
+    frame_rect: egui::Rect,
+    node_sockets: &crate::NodeSockets,
+    socket_color: egui::Color32,
+    socket_radius: f32,
+    highlight: impl Fn(SocketKind, usize) -> bool,
+) -> SocketResponses {
     let hl_size = (socket_radius + 4.0).max(4.0);
     let interact_diameter = ui
         .spacing()
         .interact_size
         .x
         .min(ui.spacing().interact_size.y);
-
-    let paint_highlight = |kind, ix| {
-        if let Some((k, i)) = pressed_socket {
-            if k == kind && i == ix {
-                return true;
-            }
-        }
-        if let Some((k, i)) = closest_socket {
-            if k == kind && i == ix {
-                return true;
-            }
-        }
-        false
-    };
 
     let builder = egui::UiBuilder::new()
         .max_rect(frame_rect.expand(hl_size))
@@ -198,7 +213,7 @@ pub(crate) fn show(
     ui.scope_builder(builder, |ui| {
         let painter = ui.painter();
         for (ix, pos, normal) in node_sockets.inputs() {
-            if paint_highlight(SocketKind::Input, ix) {
+            if highlight(SocketKind::Input, ix) {
                 paint_semicircle(
                     painter,
                     pos,
@@ -213,7 +228,7 @@ pub(crate) fn show(
             input_responses.insert(ix, ui.interact(rect, id, egui::Sense::hover()));
         }
         for (ix, pos, normal) in node_sockets.outputs() {
-            if paint_highlight(SocketKind::Output, ix) {
+            if highlight(SocketKind::Output, ix) {
                 paint_semicircle(
                     painter,
                     pos,
