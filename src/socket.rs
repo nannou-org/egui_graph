@@ -260,6 +260,7 @@ mod tests {
     struct TestGraph {
         ctx: egui::Context,
         view: View,
+        immutable: bool,
     }
 
     /// The graph state observed at the end of a pass.
@@ -287,7 +288,7 @@ mod tests {
     const INSET: f32 = 4.0;
 
     /// Lay out a new graph over two passes, since sizes settle after the first.
-    fn test_graph() -> (TestGraph, Pass) {
+    fn test_graph(immutable: bool) -> (TestGraph, Pass) {
         let view = View {
             scene_rect: SCREEN,
             layout: [(A, egui::pos2(100.0, 100.0)), (B, egui::pos2(400.0, 100.0))].into(),
@@ -295,6 +296,7 @@ mod tests {
         let mut g = TestGraph {
             ctx: egui::Context::default(),
             view,
+            immutable,
         };
         pass(&mut g, vec![]);
         let p = pass(&mut g, vec![]);
@@ -310,7 +312,8 @@ mod tests {
         };
         let mut out = None;
         let _ = g.ctx.run_ui(input, |ui| {
-            Graph::new(GRAPH).show(&mut g.view, ui, |ui, show| {
+            let graph = Graph::new(GRAPH).immutable(g.immutable);
+            graph.show(&mut g.view, ui, |ui, show| {
                 let mut b_edge_event = None;
                 show.nodes(ui, |nctx, ui| {
                     for (id, inputs, outputs) in [(A, 0, 1), (B, 1, 0)] {
@@ -373,7 +376,7 @@ mod tests {
     /// Off the frame, a press starts an edge, so the socket is detected.
     #[test]
     fn hover_off_frame_detects_socket() {
-        let (mut g, p) = test_graph();
+        let (mut g, p) = test_graph(false);
         let p = hover(&mut g, off_frame(p.b_in));
         assert_eq!(p.closest_socket, Some(B_IN));
     }
@@ -381,8 +384,16 @@ mod tests {
     /// On the frame, a press drags the node, so the socket is not detected.
     #[test]
     fn hover_on_frame_skips_socket() {
-        let (mut g, p) = test_graph();
+        let (mut g, p) = test_graph(false);
         let p = hover(&mut g, on_frame(p.b_in));
+        assert_eq!(p.closest_socket, None);
+    }
+
+    /// An immutable graph cannot start an edge, so no socket is detected.
+    #[test]
+    fn immutable_hover_skips_socket() {
+        let (mut g, p) = test_graph(true);
+        let p = hover(&mut g, off_frame(p.b_in));
         assert_eq!(p.closest_socket, None);
     }
 
@@ -390,7 +401,7 @@ mod tests {
     /// node frame, and a release there ends the edge on it.
     #[test]
     fn edge_drag_detects_socket_on_frame() {
-        let (mut g, p) = test_graph();
+        let (mut g, p) = test_graph(false);
         let start = off_frame(p.a_out);
         let end = on_frame(p.b_in);
         hover(&mut g, start);

@@ -159,7 +159,7 @@ pub struct GraphTempMemory {
     /// The closest socket that the pointer can press or connect to.
     ///
     /// Over a node frame, this is `Some` only while an edge is in progress, as
-    /// a press there drags the node.
+    /// a press there drags the node. Always `None` when the graph is immutable.
     closest_socket: Option<socket::Socket>,
     /// Whether the pointer was over any node frame during the previous frame.
     ///
@@ -675,28 +675,25 @@ impl Graph {
                 // edge. Over a node frame, a press drags the node, so a socket
                 // there is only detectable as the end of an edge in progress.
                 // Use the raw graph-space pointer, as the scene's `hover_pos()`
-                // is `None` over a node frame.
+                // is `None` over a node frame. An immutable graph detects no
+                // sockets, so its presses map to `Select`.
                 let edge_in_progress = matches!(
                     gmem.pressed.as_ref().map(|p| &p.action),
                     Some(PressAction::Socket(_))
                 );
                 let ptr_over_sockets = ptr_on_graph || (edge_in_progress && ptr_over_node_prev);
-                closest_socket = if ptr_over_sockets {
+                closest_socket = if !self.immutable && ptr_over_sockets {
                     find_closest_socket(ptr_graph, layout, &gmem, ui)
                         .map(|(socket, _dist_sqrd)| socket)
                 } else {
                     None
                 };
 
-                // When immutable, suppress socket presses (map to Select).
-                let closest_socket_for_interaction =
-                    if self.immutable { None } else { closest_socket };
-
                 // Check for graph interactions.
                 let interaction = graph_interaction(
                     layout,
                     &pointer,
-                    closest_socket_for_interaction,
+                    closest_socket,
                     ptr_on_graph,
                     ptr_graph,
                     gmem.pressed.as_ref(),
