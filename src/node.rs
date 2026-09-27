@@ -480,9 +480,10 @@ impl Node {
             gmem.node_sizes.insert(self.id, size);
 
             // Treat the pointer being over this node's frame as "over the graph"
-            // for next frame's socket detection (see `lib.rs`). `contains_pointer`
-            // stays true mid-drag (drag-and-drop target semantics) and is false
-            // when a window fully occludes the frame.
+            // for next frame's socket detection while an edge is in progress
+            // (see `lib.rs`). `contains_pointer` stays true mid-drag
+            // (drag-and-drop target semantics) and is false when a window fully
+            // occludes the frame.
             gmem.ptr_over_node |= response.contains_pointer();
 
             let ctrl_down = ui.input(|i| i.modifiers.ctrl);

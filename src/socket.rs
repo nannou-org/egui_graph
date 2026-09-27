@@ -249,3 +249,161 @@ pub(crate) fn paint(
         outputs: output_responses,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{Socket, SocketKind};
+    use crate::node::{EdgeEvent, Node, NodeId};
+    use crate::{Graph, View};
+
+    /// A graph of nodes `A` and `B`, driven one pass at a time.
+    struct TestGraph {
+        ctx: egui::Context,
+        view: View,
+    }
+
+    /// The graph state observed at the end of a pass.
+    struct Pass {
+        /// The screen position and normal of the output of `A`.
+        a_out: (egui::Pos2, egui::Vec2),
+        /// The screen position and normal of the input of `B`.
+        b_in: (egui::Pos2, egui::Vec2),
+        closest_socket: Option<Socket>,
+        b_edge_event: Option<EdgeEvent>,
+    }
+
+    const GRAPH: &str = "graph";
+    const SCREEN: egui::Rect = egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(800.0, 600.0));
+    /// Has one output on its right edge.
+    const A: NodeId = NodeId(0);
+    /// Has one input on its left edge, to the right of `A`.
+    const B: NodeId = NodeId(1);
+    const B_IN: Socket = Socket {
+        node: B,
+        kind: SocketKind::Input,
+        index: 0,
+    };
+    /// The depth of an on-frame point inside the frame, within socket detection range.
+    const INSET: f32 = 4.0;
+
+    /// Lay out a new graph over two passes, since sizes settle after the first.
+    fn test_graph() -> (TestGraph, Pass) {
+        let view = View {
+            scene_rect: SCREEN,
+            layout: [(A, egui::pos2(100.0, 100.0)), (B, egui::pos2(400.0, 100.0))].into(),
+        };
+        let mut g = TestGraph {
+            ctx: egui::Context::default(),
+            view,
+        };
+        pass(&mut g, vec![]);
+        let p = pass(&mut g, vec![]);
+        (g, p)
+    }
+
+    /// Run one pass of the graph with the given input events.
+    fn pass(g: &mut TestGraph, events: Vec<egui::Event>) -> Pass {
+        let input = egui::RawInput {
+            screen_rect: Some(SCREEN),
+            events,
+            ..Default::default()
+        };
+        let mut out = None;
+        let _ = g.ctx.run_ui(input, |ui| {
+            Graph::new(GRAPH).show(&mut g.view, ui, |ui, show| {
+                let mut b_edge_event = None;
+                show.nodes(ui, |nctx, ui| {
+                    for (id, inputs, outputs) in [(A, 0, 1), (B, 1, 0)] {
+                        let node = Node::from_id(id).inputs(inputs).outputs(outputs);
+                        let res = node.show(nctx, ui, |c| c.framed(|ui, _| ui.label("x")));
+                        if id == B {
+                            b_edge_event = res.edge_event();
+                        }
+                    }
+                });
+                let to_screen = ui
+                    .ctx()
+                    .layer_transform_to_global(ui.layer_id())
+                    .unwrap_or_default();
+                let screen = |(pos, normal)| (to_screen.mul_pos(pos), normal);
+                let gmem_arc = crate::memory(ui, crate::id(GRAPH));
+                let gmem = gmem_arc.lock().expect("failed to lock graph temp memory");
+                out = Some(Pass {
+                    a_out: screen(gmem.sockets[&A].output(0).expect("A has an output")),
+                    b_in: screen(gmem.sockets[&B].input(0).expect("B has an input")),
+                    closest_socket: gmem.closest_socket,
+                    b_edge_event,
+                });
+            });
+        });
+        out.expect("the graph ran")
+    }
+
+    /// Move the pointer to `pos`, then run a second pass, since pointer
+    /// coverage of node frames takes effect on the next pass.
+    fn hover(g: &mut TestGraph, pos: egui::Pos2) -> Pass {
+        pass(g, vec![egui::Event::PointerMoved(pos)]);
+        pass(g, vec![])
+    }
+
+    /// A press or release of the primary button at `pos`.
+    fn primary(pos: egui::Pos2, pressed: bool) -> egui::Event {
+        egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        }
+    }
+
+    /// A point outside the node frame, within socket detection range. egui
+    /// gives the frame any press within the interact radius of its edge, so
+    /// the point lies beyond that radius.
+    fn off_frame((pos, normal): (egui::Pos2, egui::Vec2)) -> egui::Pos2 {
+        let style = egui::Style::default();
+        let detect_radius = style.spacing.interact_size.min_elem();
+        pos + normal * (style.interaction.interact_radius + detect_radius) * 0.5
+    }
+
+    /// A point just inside the node frame, near the socket.
+    fn on_frame((pos, normal): (egui::Pos2, egui::Vec2)) -> egui::Pos2 {
+        pos - normal * INSET
+    }
+
+    /// Off the frame, a press starts an edge, so the socket is detected.
+    #[test]
+    fn hover_off_frame_detects_socket() {
+        let (mut g, p) = test_graph();
+        let p = hover(&mut g, off_frame(p.b_in));
+        assert_eq!(p.closest_socket, Some(B_IN));
+    }
+
+    /// On the frame, a press drags the node, so the socket is not detected.
+    #[test]
+    fn hover_on_frame_skips_socket() {
+        let (mut g, p) = test_graph();
+        let p = hover(&mut g, on_frame(p.b_in));
+        assert_eq!(p.closest_socket, None);
+    }
+
+    /// While an edge is in progress, a socket is detected from inside its
+    /// node frame, and a release there ends the edge on it.
+    #[test]
+    fn edge_drag_detects_socket_on_frame() {
+        let (mut g, p) = test_graph();
+        let start = off_frame(p.a_out);
+        let end = on_frame(p.b_in);
+        hover(&mut g, start);
+        pass(&mut g, vec![primary(start, true)]);
+        let p = hover(&mut g, end);
+        assert_eq!(p.closest_socket, Some(B_IN));
+        let p = pass(&mut g, vec![primary(end, false)]);
+        assert_eq!(
+            p.b_edge_event,
+            Some(EdgeEvent::Ended {
+                kind: SocketKind::Input,
+                index: 0,
+            })
+        );
+    }
+}

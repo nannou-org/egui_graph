@@ -156,16 +156,17 @@ pub struct GraphTempMemory {
     ///
     /// This is used to provide the position and normal of each socket when instantiating edges.
     sockets: HashMap<NodeId, NodeSockets>,
-    /// The socket that is currently closest to the mouse.
+    /// The closest socket that the pointer can press or connect to.
     ///
-    /// Always `Some` while the pointer is over the graph area, `None` otherwise.
+    /// Over a node frame, this is `Some` only while an edge is in progress, as
+    /// a press there drags the node.
     closest_socket: Option<socket::Socket>,
     /// Whether the pointer was over any node frame during the previous frame.
     ///
     /// Node frames are sublayers that win egui's hit-test over the scene, so the
     /// scene response reports "not hovered" while the pointer is over a node.
-    /// This lets socket detection still treat node frames as part of the graph
-    /// (e.g. releasing an edge over a socket that straddles a frame edge).
+    /// This lets an edge in progress still connect to a socket from within its
+    /// node frame (e.g. on release over a socket that straddles a frame edge).
     ptr_over_node: bool,
     /// The most recently observed available viewport size.
     ///
@@ -258,7 +259,7 @@ pub struct Show<'a> {
     selection_rect: Option<egui::Rect>,
     /// Whether or not the primary mouse button was just released to perform the selection.
     select: bool,
-    /// The closest socket within pressable range of the pointer.
+    /// The closest socket that the pointer can press or connect to.
     closest_socket: Option<socket::Socket>,
     /// Whether or not the primary mouse button was just released to end edge creation.
     socket_press_released: Option<socket::Socket>,
@@ -650,8 +651,8 @@ impl Graph {
 
             // Take the previous frame's "pointer over a node frame" flag (it is
             // re-accumulated from each node's `contains_pointer()` as the nodes
-            // draw) so socket detection can treat node frames as part of the
-            // graph - see the `closest_socket` gate below.
+            // draw) so an edge in progress can connect to sockets from within a
+            // node frame - see the `closest_socket` gate below.
             let ptr_over_node_prev = std::mem::take(&mut gmem.ptr_over_node);
 
             // FIXME: Here we grab the global pointer and transform its position
@@ -669,12 +670,18 @@ impl Graph {
                     .unwrap_or_default()
                     .mul_pos(ptr_global);
 
-                // Check for the closest socket. Use the raw graph-space pointer
-                // (the scene's `hover_pos()` is `None` over a node frame) gated on
-                // the pointer being over the scene background *or* a node frame, so
-                // sockets straddling a frame edge are detectable from either side.
-                let ptr_over_graph = ptr_on_graph || ptr_over_node_prev;
-                closest_socket = if ptr_over_graph {
+                // Only detect a socket that the pointer can press or connect to.
+                // Over the scene background, a press near a socket starts an
+                // edge. Over a node frame, a press drags the node, so a socket
+                // there is only detectable as the end of an edge in progress.
+                // Use the raw graph-space pointer, as the scene's `hover_pos()`
+                // is `None` over a node frame.
+                let edge_in_progress = matches!(
+                    gmem.pressed.as_ref().map(|p| &p.action),
+                    Some(PressAction::Socket(_))
+                );
+                let ptr_over_sockets = ptr_on_graph || (edge_in_progress && ptr_over_node_prev);
+                closest_socket = if ptr_over_sockets {
                     find_closest_socket(ptr_graph, layout, &gmem, ui)
                         .map(|(socket, _dist_sqrd)| socket)
                 } else {
