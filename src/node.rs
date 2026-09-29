@@ -35,6 +35,7 @@ pub struct Node {
     socket_color: Option<egui::Color32>,
     max_width: Option<f32>,
     animation_time: f32,
+    content_enabled: bool,
 }
 
 /// A unique identifier for a node within a graph.
@@ -96,7 +97,9 @@ pub struct NodeCtx<'a> {
     min_size: egui::Vec2,
     graph_id: egui::Id,
     node_id: NodeId,
-    immutable: bool,
+    /// Whether the content widgets are enabled. False for a node with
+    /// disabled content and for any node in an immutable graph.
+    content_enabled: bool,
     flow: egui::Direction,
     inputs: usize,
     outputs: usize,
@@ -122,6 +125,7 @@ impl Node {
             flow: egui::Direction::LeftToRight,
             socket_radius: 3.0,
             animation_time: 0.1,
+            content_enabled: true,
         }
     }
 
@@ -189,6 +193,18 @@ impl Node {
         self
     }
 
+    /// Whether the widgets inside the node are enabled.
+    ///
+    /// A node with disabled content still drags, selects and connects edges,
+    /// unlike a node in an [`immutable`](crate::Graph::immutable) graph. Use
+    /// this for a single node whose content must not be edited.
+    ///
+    /// Default: `true`.
+    pub fn content_enabled(mut self, enabled: bool) -> Self {
+        self.content_enabled = enabled;
+        self
+    }
+
     /// Present the `Node`'s `Window` and add the given contents.
     ///
     /// The content closure receives a [`NodeCtx`] which provides access to interaction state
@@ -241,7 +257,7 @@ impl Node {
                 min_size: content_min_size,
                 graph_id,
                 node_id: self.id,
-                immutable: false,
+                content_enabled: self.content_enabled,
                 flow: self.flow,
                 inputs: self.inputs,
                 outputs: self.outputs,
@@ -430,7 +446,7 @@ impl Node {
                 min_size: content_min_size,
                 graph_id: ctx.graph_id,
                 node_id,
-                immutable,
+                content_enabled: self.content_enabled && !immutable,
                 flow: self.flow,
                 inputs: self.inputs,
                 outputs: self.outputs,
@@ -766,16 +782,16 @@ impl<'a> NodeCtx<'a> {
         content: impl FnOnce(&mut egui::Ui, &mut crate::SocketLayout) -> T,
     ) -> FramedResponse<T> {
         let min_size = self.min_size;
-        let immutable = self.immutable;
+        let content_enabled = self.content_enabled;
         let mut socket_layout =
             crate::SocketLayout::evenly_spaced(self.flow, self.inputs, self.outputs);
         let builder = egui::UiBuilder::new().sense(egui::Sense::click_and_drag());
         let inner_response = frame.show(self.ui, |ui| {
             ui.scope_builder(builder, |ui| {
                 ui.set_min_size(min_size);
-                // Disable content widgets when immutable (inside the frame
-                // so that the frame itself retains normal styling).
-                if immutable {
+                // Disable content widgets inside the frame, so that the frame
+                // itself keeps its normal styling.
+                if !content_enabled {
                     ui.disable();
                 }
                 content(ui, &mut socket_layout)
@@ -868,5 +884,54 @@ mod tests {
         }
         assert!((outputs[0].y - rect.bottom()).abs() < 1e-3);
         assert!(inputs[0].x < inputs[1].x);
+    }
+
+    /// Whether the content ui is enabled for a node in a graph, given the
+    /// graph's immutability and the node's content flag.
+    fn graph_content_enabled(immutable: bool, content_enabled: bool) -> bool {
+        let ctx = egui::Context::default();
+        let mut view = crate::View::default();
+        let mut enabled = None;
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            crate::Graph::from_id(egui::Id::new("graph"))
+                .immutable(immutable)
+                .show(&mut view, ui, |ui, show| {
+                    show.nodes(ui, |nctx, ui| {
+                        Node::from_id(NodeId(0))
+                            .content_enabled(content_enabled)
+                            .show(nctx, ui, |c| {
+                                c.framed(|ui, _| enabled = Some(ui.is_enabled()))
+                            });
+                    });
+                });
+        });
+        enabled.expect("the node content ran")
+    }
+
+    #[test]
+    fn content_enabled_disables_only_the_node_content() {
+        let cases = [
+            (false, true, true),
+            (false, false, false),
+            (true, true, false),
+            (true, false, false),
+        ];
+        for (immutable, content, expected) in cases {
+            let enabled = graph_content_enabled(immutable, content);
+            assert_eq!(
+                enabled, expected,
+                "immutable {immutable}, content {content}"
+            );
+        }
+
+        // A static node follows the flag too.
+        let ctx = egui::Context::default();
+        let mut enabled = None;
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            Node::from_id(NodeId(0))
+                .content_enabled(false)
+                .show_static(ui, |c| c.framed(|ui, _| enabled = Some(ui.is_enabled())));
+        });
+        assert_eq!(enabled, Some(false));
     }
 }
