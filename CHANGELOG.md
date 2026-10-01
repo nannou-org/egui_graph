@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.4](https://github.com/nannou-org/egui_graph/compare/v0.16.3...v0.16.4) - 2026-09-29
+
+### Added
+
+- *(node)* let a node disable its content widgets
+
 ## [0.16.3](https://github.com/nannou-org/egui_graph/compare/v0.16.2...v0.16.3) - 2026-09-18
 
 ### Added
