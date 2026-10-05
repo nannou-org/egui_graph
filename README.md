@@ -32,39 +32,42 @@ or any other representation.
 ## Quick Start
 
 ```rust
-use egui_graph::{Graph, View, Node, NodeId, Edge};
+use egui_graph::{edge::Edge, node::Node, Graph, NodeId, View};
 
-// Create a view to store node and "camera" positions.
-let mut view = View::default();
-
-// Show the graph widget
-Graph::new("my_graph")
-    .show(&mut view, ui, |ui, mut show| {
-        // Add nodes to the graph
-        show.nodes(|nctx, ui| {
+// The `View` stores the node positions and the "camera". Keep it, and the
+// selection state of each edge, between frames.
+fn graph_ui(ui: &mut egui::Ui, view: &mut View, edge_selected: &mut bool) {
+    Graph::new("my_graph").show(view, ui, |ui, show| {
+        // Add nodes to the graph.
+        show.nodes(ui, |nctx, ui| {
             Node::new("node_1")
                 .inputs(2)
                 .outputs(1)
                 .show(nctx, ui, |node_ctx| {
-                    node_ctx.framed(|ui| {
-                        ui.label("My Node");
-                    })
-                })
-        });
-
-        // Add edges between nodes
-        show.edges(|ectx, ui| {
-            let selected = false;
+                    node_ctx.framed(|ui, _sockets| ui.label("My Node"))
+                });
+            Node::new("node_2")
+                .inputs(2)
+                .show(nctx, ui, |node_ctx| {
+                    node_ctx.framed(|ui, _sockets| ui.label("Other Node"))
+                });
+        })
+        // Add edges between nodes.
+        .edges(ui, |ectx, ui| {
             Edge::new(
-                (NodeId::new("node_1"), 0),  // From output 0
-                (NodeId::new("node_2"), 1),  // To input 1
-                &mut selected
-            ).show(ectx, ui);
+                (NodeId::new("node_1"), 0), // From output 0
+                (NodeId::new("node_2"), 1), // To input 1
+                edge_selected,
+            )
+            .show(ectx, ui);
         });
     });
+}
 ```
 
-Visit the demo.rs example for a more thorough, up-to-date example.
+Visit the demo.rs example for a more thorough, up-to-date example. It shows
+how to add and remove nodes and edges in response to the node and edge
+responses.
 
 ## Core Components
 
@@ -73,12 +76,16 @@ Visit the demo.rs example for a more thorough, up-to-date example.
 The main widget that contains all nodes and edges:
 
 ```rust
-Graph::new(id_source)
-    .background(true)           // Enable background
-    .dot_grid(true)             // Show dot grid
-    .zoom_range(0.1..=2.0)      // Set zoom limits
-    .center_view(true)          // Center the camera
-    .show(&mut view, ui, |ui, show| { /* ... */ })
+use egui_graph::{Graph, View};
+
+fn graph_ui(ui: &mut egui::Ui, view: &mut View) {
+    Graph::new("my_graph")
+        .background(true)      // Enable background
+        .dot_grid(true)        // Show dot grid
+        .zoom_range(0.1..=2.0) // Set zoom limits
+        .center_view(true)     // Center the camera
+        .show(view, ui, |ui, show| { /* ... */ });
+}
 ```
 
 ### Nodes
@@ -86,18 +93,21 @@ Graph::new(id_source)
 Nodes are containers with input/output sockets:
 
 ```rust
-Node::new(id_source)
-    .inputs(3)                  // Number of input sockets
-    .outputs(2)                 // Number of output sockets
-    .flow(Direction::LeftToRight) // Socket arrangement
-    .socket_color(Color32::BLUE)
-    .socket_radius(5.0)
-    .show(ctx, ui, |node_ctx| {
-        // Node content goes here
-        node_ctx.framed(|ui| {
-            ui.label("Node Content");
-        })
-    })
+use egui::{Color32, Direction};
+use egui_graph::{node::Node, NodesCtx};
+
+fn node_ui(nctx: &mut NodesCtx, ui: &mut egui::Ui) {
+    Node::new("my_node")
+        .inputs(3)                    // Number of input sockets
+        .outputs(2)                   // Number of output sockets
+        .flow(Direction::LeftToRight) // Socket arrangement
+        .socket_color(Color32::BLUE)
+        .socket_radius(5.0)
+        .show(nctx, ui, |node_ctx| {
+            // Node content goes here
+            node_ctx.framed(|ui, _sockets| ui.label("Node Content"))
+        });
+}
 ```
 
 ### Edges
@@ -105,13 +115,19 @@ Node::new(id_source)
 Connect nodes with bezier curve edges:
 
 ```rust
-Edge::new(
-    (source_node_id, output_index),
-    (target_node_id, input_index),
-    &mut selected
-)
-.distance_per_point(1.0)  // Curve sampling distance
-.show(ctx, ui)
+use egui_graph::{edge::Edge, EdgesCtx, NodeId};
+
+fn edge_ui(ectx: &mut EdgesCtx, ui: &mut egui::Ui, selected: &mut bool) {
+    let (source_node_id, output_index) = (NodeId::new("node_1"), 0);
+    let (target_node_id, input_index) = (NodeId::new("node_2"), 1);
+    Edge::new(
+        (source_node_id, output_index),
+        (target_node_id, input_index),
+        selected,
+    )
+    .distance_per_point(1.0) // Curve sampling distance
+    .show(ectx, ui);
+}
 ```
 
 ### Automatic Layout
@@ -121,21 +137,31 @@ orders and positions nodes to minimise edge crossings and keep edges straight,
 taking the socket each edge connects to into account:
 
 ```rust
-use egui_graph::{layout, LayoutNode, LayoutParams};
+use egui::Direction;
+use egui_graph::{layout, LayoutNode, LayoutParams, NodeId, View};
 
-let positions = layout(
-    nodes.iter().map(|(id, size, inputs, outputs)| {
-        let node = LayoutNode::new(*size)
-            .socket_padding(egui_graph::socket_padding(&style))
-            .inputs(*inputs)
-            .outputs(*outputs);
-        (*id, node)
-    }),
-    // Edge endpoints are `(node, socket index)`, as in `Edge::new`.
-    edges.iter().map(|(a, out_ix, b, in_ix)| ((*a, *out_ix), (*b, *in_ix))),
-    LayoutParams::new(Direction::LeftToRight),
-);
-view.layout = positions;
+// Each node is `(id, size, inputs, outputs)`, and each edge is
+// `(output node, output index, input node, input index)`.
+fn layout_graph(
+    view: &mut View,
+    style: &egui::Style,
+    nodes: &[(NodeId, egui::Vec2, usize, usize)],
+    edges: &[(NodeId, usize, NodeId, usize)],
+) {
+    let positions = layout(
+        nodes.iter().map(|(id, size, inputs, outputs)| {
+            let node = LayoutNode::new(*size)
+                .socket_padding(egui_graph::socket_padding(style))
+                .inputs(*inputs)
+                .outputs(*outputs);
+            (*id, node)
+        }),
+        // Edge endpoints are `(node, socket index)`, as in `Edge::new`.
+        edges.iter().map(|(a, out_ix, b, in_ix)| ((*a, *out_ix), (*b, *in_ix))),
+        LayoutParams::new(Direction::LeftToRight),
+    );
+    view.layout = positions;
+}
 ```
 
 For graphs without socket information, `layout_from_sizes` accepts plain
@@ -146,13 +172,35 @@ which additionally returns corridor waypoints for the edges that need them,
 and thread each edge through its route when drawing:
 
 ```rust
-let (positions, routes) = layout_routed(nodes, edges, params);
-view.layout = positions;
+use egui_graph::{edge::Edge, layout_routed, EdgeRoutes, EdgesCtx};
+use egui_graph::{LayoutNode, LayoutParams, NodeId, View};
+
+type Socket = (NodeId, usize);
+
+fn layout_graph(
+    view: &mut View,
+    nodes: Vec<(NodeId, LayoutNode)>,
+    edges: &[(Socket, Socket)],
+    params: LayoutParams,
+) -> EdgeRoutes {
+    let (positions, routes) = layout_routed(nodes, edges.iter().copied(), params);
+    view.layout = positions;
+    routes
+}
+
 // ... when drawing each edge:
-let waypoints = routes.route((src, out_ix), (dst, in_ix), 0).unwrap_or(&[]);
-Edge::new((src, out_ix), (dst, in_ix), &mut selected)
-    .waypoints(waypoints)
-    .show(ctx, ui);
+fn edge_ui(
+    ectx: &mut EdgesCtx,
+    ui: &mut egui::Ui,
+    routes: &EdgeRoutes,
+    ((src, out_ix), (dst, in_ix)): (Socket, Socket),
+    selected: &mut bool,
+) {
+    let waypoints = routes.route((src, out_ix), (dst, in_ix), 0).unwrap_or(&[]);
+    Edge::new((src, out_ix), (dst, in_ix), selected)
+        .waypoints(waypoints)
+        .show(ectx, ui);
+}
 ```
 
 Nodes may flow in different directions within one graph. Give a node its own
@@ -162,6 +210,10 @@ graph into clusters that are arranged along the outer direction
 (`LayoutParams::flow`):
 
 ```rust
+use egui::Direction;
+use egui_graph::LayoutNode;
+
+let size = egui::vec2(80.0, 40.0);
 let node = LayoutNode::new(size).inputs(1).outputs(1).flow(Direction::TopDown);
 ```
 
@@ -170,20 +222,21 @@ let node = LayoutNode::new(size).inputs(1).outputs(1).flow(Direction::TopDown);
 ### Mouse Controls
 - **Left Click**: Select node/edge
 - **Ctrl + Left Click**: Toggle selection
-- **Shift + Left Click**: Clear selection
-- **Left Drag on Background**: Rectangle selection
+- **Left Drag on Background**: Rectangle selection of nodes
+- **Shift + Left Drag on Background**: Rectangle selection of edges
 - **Left Drag on Node**: Move selected nodes
 - **Middle Mouse Drag**: Pan view
-- **Scroll Wheel**: Zoom in/out
+- **Scroll Wheel**: Pan view
+- **Ctrl/Cmd + Scroll Wheel or Pinch**: Zoom in/out
 
 ### Keyboard Controls
 - **Delete/Backspace**: Remove selected nodes/edges
 
 ### Socket Interaction
-- **Click Output Socket**: Start edge creation
-- **Drag to Input Socket**: Preview connection
-- **Release on Input**: Create edge
-- **ESC**: Cancel edge creation
+- **Press a Socket**: Start edge creation, from an input or an output
+- **Drag to a Socket**: Preview connection
+- **Release on a Socket**: Create edge, if the socket kind is the opposite of the start socket
+- **Release Elsewhere**: Cancel edge creation
 
 ## Examples
 
@@ -213,7 +266,8 @@ The library follows egui's immediate-mode paradigm while maintaining necessary
 state for graph interactions. Internal state includes:
 
 - Node sizes
-- Selection state for nodes and edges
+- Selection state for nodes (the application keeps the selection state of each
+  edge)
 - Active edge creation
 - Socket positions for edge rendering
 

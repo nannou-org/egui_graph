@@ -1,3 +1,6 @@
+// The README examples use the automatic layout.
+#![cfg_attr(feature = "layout", doc = include_str!("../README.md"))]
+
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::Hash;
 use std::sync::{Arc, Mutex};
