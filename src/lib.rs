@@ -1488,20 +1488,37 @@ fn maintain_zoom_scene_rect(
     cur: egui::Vec2,
     zoom_range: egui::Rangef,
 ) -> egui::Rect {
-    let size = scene_rect.size();
-    if prev == cur || !scene_rect.is_finite() || size.x <= 0.0 || size.y <= 0.0 {
+    if prev == cur {
         return scene_rect;
     }
-    // The scale egui used last frame is set by the binding (letterbox) axis,
-    // i.e. the smaller ratio, clamped to the same range egui will enforce.
-    let scale = zoom_range.clamp((prev / size).min_elem());
-    if !scale.is_finite() || scale <= 0.0 {
+    let Some(scale) = scene_scale(scene_rect, prev, zoom_range) else {
         return scene_rect;
-    }
+    };
     // Using the same scalar on both axes makes `scene_rect` adopt the viewport
     // aspect ratio - the steady-state shape egui itself produces - while
     // keeping the center fixed. Next frame egui's fit yields `scale` again.
     egui::Rect::from_center_size(scene_rect.center(), cur / scale)
+}
+
+/// The scale (pixels-per-world-unit) with which egui's [`Scene`] fits
+/// `scene_rect` into a viewport of `viewport_size`.
+///
+/// Returns `None` when the inputs are degenerate.
+///
+/// [`Scene`]: egui::containers::Scene
+fn scene_scale(
+    scene_rect: egui::Rect,
+    viewport_size: egui::Vec2,
+    zoom_range: egui::Rangef,
+) -> Option<f32> {
+    let size = scene_rect.size();
+    if !scene_rect.is_finite() || size.x <= 0.0 || size.y <= 0.0 {
+        return None;
+    }
+    // The binding (letterbox) axis, i.e. the smaller ratio, sets the scale,
+    // clamped to the same range egui enforces.
+    let scale = zoom_range.clamp((viewport_size / size).min_elem());
+    (scale.is_finite() && scale > 0.0).then_some(scale)
 }
 
 /// Snap a scalar to a multiple of `step` according to `snap`.
