@@ -30,6 +30,9 @@ pub struct Graph {
     center_view: bool,
     /// How the view responds when the available viewport size changes.
     resize_behavior: ResizeBehavior,
+    /// How the view pans while a drag holds the pointer near the edge of the
+    /// graph area, or `None` to disable it.
+    auto_pan: Option<AutoPan>,
     id: egui::Id,
     /// If set, overwrite the graph's selected nodes at the start of the frame.
     selected_nodes: Option<HashSet<NodeId>>,
@@ -77,6 +80,22 @@ pub enum ResizeBehavior {
     ///
     /// [`Scene`]: egui::containers::Scene
     MaintainView,
+}
+
+/// How the view pans while a drag holds the pointer near the edge of the
+/// graph area. See [`Graph::auto_pan`].
+///
+/// On each axis, the pan speed grows linearly from zero at `margin` pixels
+/// inside an edge to `max_speed` at the edge and beyond.
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
+pub struct AutoPan {
+    /// The width of the band along each edge of the graph area within which
+    /// the view pans, in screen pixels.
+    pub margin: f32,
+    /// The pan speed with the pointer at or past an edge, in screen pixels
+    /// per second.
+    pub max_speed: f32,
 }
 
 /// How node positions and frame sizes are snapped to whole graph-space units.
@@ -343,6 +362,8 @@ impl Graph {
     pub const DEFAULT_CENTER_VIEW: bool = false;
     /// The default [`ResizeBehavior`].
     pub const DEFAULT_RESIZE_BEHAVIOR: ResizeBehavior = ResizeBehavior::MaintainZoom;
+    /// The default [`AutoPan`]. Auto-pan is enabled by default.
+    pub const DEFAULT_AUTO_PAN: Option<AutoPan> = Some(AutoPan::DEFAULT);
     /// The default snapping mode. Snaps node positions and frame sizes to the
     /// nearest whole graph-space unit.
     pub const DEFAULT_SNAP: Option<Snap> = Some(Snap::Round);
@@ -380,6 +401,7 @@ impl Graph {
             max_inner_size: None,
             center_view: Self::DEFAULT_CENTER_VIEW,
             resize_behavior: Self::DEFAULT_RESIZE_BEHAVIOR,
+            auto_pan: Self::DEFAULT_AUTO_PAN,
             id,
             selected_nodes: None,
             immutable: false,
@@ -454,6 +476,22 @@ impl Graph {
     /// Default: [`Self::DEFAULT_RESIZE_BEHAVIOR`].
     pub fn resize_behavior(mut self, behavior: ResizeBehavior) -> Self {
         self.resize_behavior = behavior;
+        self
+    }
+
+    /// How the view pans while a drag holds the pointer near the edge of the
+    /// graph area, or `None` to disable it.
+    ///
+    /// This lets a node drag, an edge in progress or a rectangle selection
+    /// reach parts of the graph outside the view. In an
+    /// [`immutable`](Self::immutable) graph, only a rectangle selection pans
+    /// the view. The view pans only once a press becomes a drag, so a click
+    /// near the edge does not move it. Has no effect while
+    /// [`center_view`](Self::center_view) is set.
+    ///
+    /// Default: [`Self::DEFAULT_AUTO_PAN`] ([`AutoPan::DEFAULT`]).
+    pub fn auto_pan(mut self, auto_pan: Option<AutoPan>) -> Self {
+        self.auto_pan = auto_pan;
         self
     }
 
@@ -611,6 +649,22 @@ impl Graph {
             }
             // Record unconditionally so toggling `center_view`/behaviour works.
             gmem.last_viewport_size = Some(viewport_size);
+
+            // Pan the view while a drag holds the pointer near the edge of the
+            // graph area. As this happens before the scene shows, the
+            // graph-space pointer of this frame includes the pan, so dragged
+            // nodes, an edge in progress and a selection rect follow the
+            // pointer. Skip when `center_view` is set, as above.
+            if let Some(auto_pan) = self.auto_pan.filter(|_| !self.center_view) {
+                let action = gmem.pressed.as_ref().map(|p| &p.action);
+                let velocity = drag_pan_velocity(ui, auto_pan, graph_rect, action, self.immutable);
+                if velocity != egui::Vec2::ZERO {
+                    let delta = velocity * ui.input(|i| i.stable_dt);
+                    *scene_rect =
+                        pan_scene_rect(*scene_rect, viewport_size, self.zoom_range, delta);
+                    ui.ctx().request_repaint();
+                }
+            }
         }
 
         // Create the Scene.
@@ -910,6 +964,14 @@ impl Graph {
     }
 }
 
+impl AutoPan {
+    /// A 32 pixel margin with a maximum speed of 1000 pixels per second.
+    pub const DEFAULT: Self = Self {
+        margin: 32.0,
+        max_speed: 1000.0,
+    };
+}
+
 impl GraphTempMemory {
     /// Get the recorded sizes of all nodes.
     pub fn node_sizes(&self) -> &NodeSizes {
@@ -1205,6 +1267,12 @@ impl Default for View {
             scene_rect: egui::Rect::ZERO,
             layout: Default::default(),
         }
+    }
+}
+
+impl Default for AutoPan {
+    fn default() -> Self {
+        Self::DEFAULT
     }
 }
 
@@ -1519,6 +1587,89 @@ fn scene_scale(
     // clamped to the same range egui enforces.
     let scale = zoom_range.clamp((viewport_size / size).min_elem());
     (scale.is_finite() && scale > 0.0).then_some(scale)
+}
+
+/// Translate `scene_rect` so that egui's [`Scene`] pans the view by `delta`
+/// screen pixels within a viewport of `viewport_size`.
+///
+/// Returns `scene_rect` unchanged when the inputs are degenerate.
+///
+/// [`Scene`]: egui::containers::Scene
+fn pan_scene_rect(
+    scene_rect: egui::Rect,
+    viewport_size: egui::Vec2,
+    zoom_range: egui::Rangef,
+    delta: egui::Vec2,
+) -> egui::Rect {
+    match scene_scale(scene_rect, viewport_size, zoom_range) {
+        Some(scale) if delta.is_finite() => scene_rect.translate(delta / scale),
+        _ => scene_rect,
+    }
+}
+
+/// The auto-pan velocity for the current input, in screen pixels per second.
+///
+/// This is zero unless the primary button holds a drag whose press `action`
+/// pans the view. `viewport` is the graph area in the coordinates of `ui`.
+fn drag_pan_velocity(
+    ui: &egui::Ui,
+    auto_pan: AutoPan,
+    viewport: egui::Rect,
+    action: Option<&PressAction>,
+    immutable: bool,
+) -> egui::Vec2 {
+    if !action.is_some_and(|action| drag_pans(action, immutable)) {
+        return egui::Vec2::ZERO;
+    }
+    // A press that is still a possible click does not pan, so that a click
+    // on a node near the edge does not move the view.
+    let ptr_global = ui.input(|i| {
+        let pointer = &i.pointer;
+        let dragging = pointer.primary_down() && pointer.is_decidedly_dragging();
+        pointer.interact_pos().filter(|_| dragging)
+    });
+    let Some(ptr_global) = ptr_global else {
+        return egui::Vec2::ZERO;
+    };
+    let ptr = ui
+        .ctx()
+        .layer_transform_from_global(ui.layer_id())
+        .map_or(ptr_global, |t| t.mul_pos(ptr_global));
+    auto_pan_velocity(auto_pan, viewport, ptr)
+}
+
+/// Whether a drag with the given press action pans the view near the edge of
+/// the graph area.
+///
+/// An immutable graph has no node drags or edges, so only a rectangle
+/// selection pans it.
+fn drag_pans(action: &PressAction, immutable: bool) -> bool {
+    match action {
+        PressAction::Select => true,
+        PressAction::DragNodes { .. } | PressAction::Socket(_) => !immutable,
+    }
+}
+
+/// The auto-pan velocity, in screen pixels per second, for a pointer at `ptr`
+/// over the graph area `viewport`. See [`AutoPan`].
+///
+/// Returns zero for a margin or speed that is not positive and finite.
+fn auto_pan_velocity(auto_pan: AutoPan, viewport: egui::Rect, ptr: egui::Pos2) -> egui::Vec2 {
+    let AutoPan { margin, max_speed } = auto_pan;
+    let valid = |v: f32| v.is_finite() && v > 0.0;
+    if !valid(margin) || !valid(max_speed) || !ptr.is_finite() {
+        return egui::Vec2::ZERO;
+    }
+    // The depth of `p` into the band along each edge, as a fraction of the
+    // margin, signed toward the nearer edge.
+    let axis = |min: f32, max: f32, p: f32| {
+        let into_max = (p - (max - margin)) / margin;
+        let into_min = (min + margin - p) / margin;
+        into_max.clamp(0.0, 1.0) - into_min.clamp(0.0, 1.0)
+    };
+    let x = axis(viewport.min.x, viewport.max.x, ptr.x);
+    let y = axis(viewport.min.y, viewport.max.y, ptr.y);
+    egui::vec2(x, y) * max_speed
 }
 
 /// Snap a scalar to a multiple of `step` according to `snap`.
@@ -2246,6 +2397,228 @@ mod tests {
             let ix = selection_ix(&shapes, &style).expect("the selection area is painted");
             let window_text = |s: &ClippedShape| matches!(&s.shape, egui::Shape::Text(t) if t.galley.text() == "window");
             assert!(shapes[ix + 1..].iter().any(window_text));
+        }
+    }
+
+    mod auto_pan {
+        use crate::node::{Node, NodeId};
+        use crate::socket::{Socket, SocketKind};
+        use crate::{
+            auto_pan_velocity, drag_pans, pan_scene_rect, AutoPan, Graph, PressAction, View,
+        };
+        use egui::{pos2, vec2, Pos2, Rangef, Rect, Vec2};
+
+        /// The graph area of the input-driven tests.
+        const SCREEN: Rect = Rect::from_min_max(Pos2::ZERO, pos2(800.0, 600.0));
+        const GRAPH: &str = "graph";
+        const A: NodeId = NodeId(0);
+        /// The time between passes, in seconds.
+        const DT: f32 = 1.0 / 60.0;
+
+        /// A graph of the node `A`, driven one pass at a time.
+        struct TestGraph {
+            ctx: egui::Context,
+            view: View,
+            time: f64,
+        }
+
+        /// The graph state observed at the end of a pass.
+        struct Pass {
+            scene_rect: Rect,
+            /// The graph-space position of `A`.
+            a_pos: Pos2,
+            /// A screen-space point on the frame of `A`, clear of its content,
+            /// as the label within the frame senses presses for text
+            /// selection.
+            a_grip: Pos2,
+            /// The graph-space pointer position.
+            ptr: Option<Pos2>,
+        }
+
+        /// Lay out a new graph with `A` at `a_pos`, over two passes, since
+        /// sizes settle after the first.
+        fn test_graph(a_pos: Pos2) -> (TestGraph, Pass) {
+            let view = View {
+                scene_rect: SCREEN,
+                layout: [(A, a_pos)].into(),
+            };
+            let mut g = TestGraph {
+                ctx: egui::Context::default(),
+                view,
+                time: 0.0,
+            };
+            pass(&mut g, vec![]);
+            let p = pass(&mut g, vec![]);
+            (g, p)
+        }
+
+        /// Run one pass of the graph with the given input events.
+        fn pass(g: &mut TestGraph, events: Vec<egui::Event>) -> Pass {
+            g.time += f64::from(DT);
+            let input = egui::RawInput {
+                screen_rect: Some(SCREEN),
+                time: Some(g.time),
+                predicted_dt: DT,
+                events,
+                ..Default::default()
+            };
+            let mut seen = None;
+            let _ = g.ctx.run_ui(input, |ui| {
+                let graph = Graph::new(GRAPH).snap(None);
+                graph.show(&mut g.view, ui, |ui, show| {
+                    let mut a = None;
+                    show.nodes(ui, |nctx, ui| {
+                        let node = Node::from_id(A);
+                        a = Some(node.show(nctx, ui, |c| c.framed(|ui, _| ui.label("x"))));
+                    });
+                    let a = a.expect("the node ran");
+                    let ctx = ui.ctx();
+                    let to_screen = ctx.layer_transform_to_global(ui.layer_id());
+                    let to_screen = to_screen.unwrap_or_default();
+                    let ptr = ui.input(|i| i.pointer.latest_pos());
+                    let ptr = ptr.map(|p| to_screen.inverse().mul_pos(p));
+                    let grip = a.rect.min + Vec2::splat(2.0);
+                    seen = Some((to_screen.mul_pos(grip), ptr));
+                });
+            });
+            let (a_grip, ptr) = seen.expect("the graph ran");
+            Pass {
+                scene_rect: g.view.scene_rect,
+                a_pos: g.view.layout[&A],
+                a_grip,
+                ptr,
+            }
+        }
+
+        /// A press or release of the primary button at `pos`.
+        fn primary(pos: Pos2, pressed: bool) -> egui::Event {
+            egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            }
+        }
+
+        /// The default auto-pan velocity for a pointer at `ptr` over `SCREEN`.
+        fn velocity(ptr: Pos2) -> Vec2 {
+            auto_pan_velocity(AutoPan::DEFAULT, SCREEN, ptr)
+        }
+
+        #[test]
+        fn velocity_is_zero_away_from_the_edges() {
+            assert_eq!(velocity(SCREEN.center()), Vec2::ZERO);
+            assert_eq!(velocity(pos2(33.0, 33.0)), Vec2::ZERO);
+            assert_eq!(velocity(pos2(767.0, 567.0)), Vec2::ZERO);
+        }
+
+        #[test]
+        fn velocity_grows_toward_each_edge() {
+            let AutoPan { margin, max_speed } = AutoPan::DEFAULT;
+            let half = max_speed * 0.5;
+            let mid = SCREEN.center();
+            let x_near_max = SCREEN.max.x - margin * 0.5;
+            assert_eq!(velocity(pos2(x_near_max, mid.y)), vec2(half, 0.0));
+            assert_eq!(velocity(pos2(margin * 0.5, mid.y)), vec2(-half, 0.0));
+            assert_eq!(velocity(pos2(mid.x, margin * 0.5)), vec2(0.0, -half));
+            let y_near_max = SCREEN.max.y - margin * 0.5;
+            assert_eq!(velocity(pos2(mid.x, y_near_max)), vec2(0.0, half));
+            // At an edge and past it, the speed is the maximum.
+            assert_eq!(velocity(pos2(SCREEN.max.x, mid.y)), vec2(max_speed, 0.0));
+            assert_eq!(velocity(pos2(-100.0, mid.y)), vec2(-max_speed, 0.0));
+            // In a corner, both axes pan.
+            assert_eq!(velocity(SCREEN.max), vec2(max_speed, max_speed));
+        }
+
+        #[test]
+        fn velocity_is_zero_for_a_bad_config() {
+            let ptr = SCREEN.max;
+            for (margin, max_speed) in [(0.0, 1000.0), (32.0, 0.0), (f32::NAN, 1000.0)] {
+                let auto_pan = AutoPan { margin, max_speed };
+                assert_eq!(auto_pan_velocity(auto_pan, SCREEN, ptr), Vec2::ZERO);
+            }
+        }
+
+        #[test]
+        fn pan_scene_rect_pans_by_screen_pixels() {
+            let unbounded = Rangef::new(0.0, f32::INFINITY);
+            let scene = Rect::from_min_size(Pos2::ZERO, vec2(100.0, 100.0));
+            // A scale of 2 halves the graph-space distance.
+            let out = pan_scene_rect(scene, vec2(200.0, 200.0), unbounded, vec2(10.0, -4.0));
+            assert_eq!(out, scene.translate(vec2(5.0, -2.0)));
+            // The zoom range clamps the scale, as egui's `Scene` does.
+            let range = Rangef::new(0.25, 1.0);
+            let out = pan_scene_rect(scene, vec2(10.0, 10.0), range, vec2(10.0, 0.0));
+            assert_eq!(out, scene.translate(vec2(40.0, 0.0)));
+        }
+
+        #[test]
+        fn pan_scene_rect_skips_degenerate_inputs() {
+            let unbounded = Rangef::new(0.0, f32::INFINITY);
+            let size = vec2(200.0, 200.0);
+            let zero = Rect::from_min_size(Pos2::ZERO, vec2(0.0, 100.0));
+            assert_eq!(pan_scene_rect(zero, size, unbounded, vec2(1.0, 1.0)), zero);
+            let scene = Rect::from_min_size(Pos2::ZERO, vec2(100.0, 100.0));
+            let nan = vec2(f32::NAN, 0.0);
+            assert_eq!(pan_scene_rect(scene, size, unbounded, nan), scene);
+        }
+
+        #[test]
+        fn immutable_graph_pans_only_for_selection() {
+            let socket = Socket {
+                node: A,
+                kind: SocketKind::Output,
+                index: 0,
+            };
+            let drag = PressAction::DragNodes { node: None };
+            let edge = PressAction::Socket(socket);
+            assert!(drag_pans(&PressAction::Select, false));
+            assert!(drag_pans(&drag, false));
+            assert!(drag_pans(&edge, false));
+            assert!(drag_pans(&PressAction::Select, true));
+            assert!(!drag_pans(&drag, true));
+            assert!(!drag_pans(&edge, true));
+        }
+
+        /// A node dragged to the right edge pans the view right, and the node
+        /// stays under the pointer in graph space.
+        #[test]
+        fn node_drag_near_edge_pans_view() {
+            let (mut g, p) = test_graph(pos2(400.0, 300.0));
+            let start = p.a_grip;
+            pass(&mut g, vec![egui::Event::PointerMoved(start)]);
+            pass(&mut g, vec![primary(start, true)]);
+            // Hold the pointer 4 pixels inside the right edge.
+            let near_edge = pos2(SCREEN.max.x - 4.0, start.y);
+            let first = pass(&mut g, vec![egui::Event::PointerMoved(near_edge)]);
+            let ptr_offset = |p: &Pass| p.a_pos - p.ptr.expect("the pointer is over the graph");
+            let offset = ptr_offset(&first);
+            // A scene scale of 1, with the pointer 28 pixels into the margin.
+            let step = velocity(near_edge).x * DT;
+            assert!(step > 0.0);
+            let mut prev = first;
+            for _ in 0..5 {
+                let p = pass(&mut g, vec![]);
+                let pan = p.scene_rect.min - prev.scene_rect.min;
+                assert!((pan - vec2(step, 0.0)).length() < 1e-2, "pan {pan:?}");
+                assert!((ptr_offset(&p) - offset).length() < 1e-2);
+                prev = p;
+            }
+        }
+
+        /// A press on a node near the edge that does not move is a possible
+        /// click, so the view does not pan.
+        #[test]
+        fn press_without_drag_does_not_pan() {
+            let (mut g, p) = test_graph(pos2(780.0, 300.0));
+            let start = p.a_grip;
+            assert!(velocity(start).x > 0.0, "the node is within the margin");
+            pass(&mut g, vec![egui::Event::PointerMoved(start)]);
+            let pressed = pass(&mut g, vec![primary(start, true)]);
+            for _ in 0..5 {
+                let p = pass(&mut g, vec![]);
+                assert_eq!(p.scene_rect, pressed.scene_rect);
+            }
         }
     }
 }
