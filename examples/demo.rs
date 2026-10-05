@@ -406,7 +406,7 @@ fn nodes(nctx: &mut egui_graph::NodesCtx, ui: &mut egui::Ui, state: &mut State) 
             .flow(flow)
             .socket_radius(state.socket_radius)
             .socket_color(state.socket_color)
-            .show(nctx, ui, |node_ctx| {
+            .show_or_cull(nctx, ui, |node_ctx| {
                 node_ctx.framed(|ui, sockets| match node.kind {
                     NodeKind::Label => {
                         ui.label(&node.name);
