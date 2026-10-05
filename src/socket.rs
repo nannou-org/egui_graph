@@ -116,19 +116,18 @@ fn paint_semicircle(
 /// Paint and interact with all sockets for a node.
 ///
 /// Phase A: extracts highlight state (pressed/closest socket) from graph memory, then drops the lock.
-/// Phase B: creates a socket sublayer, paints each socket as an outward-facing semicircle
+/// Phase B: paints each socket as an outward-facing semicircle on the socket layer
 /// (using `Shape::convex_polygon`), and calls `ui.interact()` to produce per-socket responses.
 ///
 /// By rendering semicircles that only extend outward from the frame border, sockets avoid
 /// visual overlap with node frames regardless of sublayer ordering.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn show(
-    ui: &mut egui::Ui,
+    ui: &egui::Ui,
     graph_id: egui::Id,
     node_id: NodeId,
     egui_id: egui::Id,
     socket_layer: egui::LayerId,
-    frame_rect: egui::Rect,
     node_sockets: &crate::NodeSockets,
     socket_color: egui::Color32,
     socket_radius: f32,
@@ -172,7 +171,6 @@ pub(crate) fn show(
         ui,
         egui_id,
         socket_layer,
-        frame_rect,
         node_sockets,
         socket_color,
         socket_radius,
@@ -182,15 +180,18 @@ pub(crate) fn show(
 
 /// Paint each socket on `socket_layer` and allocate its hover response.
 ///
+/// The hover responses live on the layer of `ui`, not on `socket_layer`. On a
+/// layer above the graph scene, a socket response covers egui's hit-test area
+/// and hides the scene behind it, so egui gives a press on the socket to the
+/// nearby node frame.
+///
 /// `highlight` names the sockets that get the larger, faded semicircle
 /// behind them, such as a pressed socket or the closest one to the pointer
 /// while an edge is in progress. This is the graph-free half of [`show`].
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn paint(
-    ui: &mut egui::Ui,
+    ui: &egui::Ui,
     egui_id: egui::Id,
     socket_layer: egui::LayerId,
-    frame_rect: egui::Rect,
     node_sockets: &crate::NodeSockets,
     socket_color: egui::Color32,
     socket_radius: f32,
@@ -202,50 +203,211 @@ pub(crate) fn paint(
         .interact_size
         .x
         .min(ui.spacing().interact_size.y);
+    let painter = ui.painter().clone().with_layer_id(socket_layer);
 
-    let builder = egui::UiBuilder::new()
-        .max_rect(frame_rect.expand(hl_size))
-        .layer_id(socket_layer);
-
-    let mut input_responses = std::collections::BTreeMap::new();
-    let mut output_responses = std::collections::BTreeMap::new();
-
-    ui.scope_builder(builder, |ui| {
-        let painter = ui.painter();
-        for (ix, pos, normal) in node_sockets.inputs() {
-            if highlight(SocketKind::Input, ix) {
-                paint_semicircle(
-                    painter,
-                    pos,
-                    hl_size,
-                    normal,
-                    socket_color.linear_multiply(0.25),
-                );
-            }
-            paint_semicircle(painter, pos, socket_radius, normal, socket_color);
-            let id = egui_id.with("in").with(ix);
-            let rect = egui::Rect::from_center_size(pos, egui::Vec2::splat(interact_diameter));
-            input_responses.insert(ix, ui.interact(rect, id, egui::Sense::hover()));
+    let socket = |kind, ix, pos, normal| {
+        if highlight(kind, ix) {
+            let color = socket_color.linear_multiply(0.25);
+            paint_semicircle(&painter, pos, hl_size, normal, color);
         }
-        for (ix, pos, normal) in node_sockets.outputs() {
-            if highlight(SocketKind::Output, ix) {
-                paint_semicircle(
-                    painter,
-                    pos,
-                    hl_size,
-                    normal,
-                    socket_color.linear_multiply(0.25),
-                );
-            }
-            paint_semicircle(painter, pos, socket_radius, normal, socket_color);
-            let id = egui_id.with("out").with(ix);
-            let rect = egui::Rect::from_center_size(pos, egui::Vec2::splat(interact_diameter));
-            output_responses.insert(ix, ui.interact(rect, id, egui::Sense::hover()));
-        }
-    });
+        paint_semicircle(&painter, pos, socket_radius, normal, socket_color);
+        let id = match kind {
+            SocketKind::Input => egui_id.with("in"),
+            SocketKind::Output => egui_id.with("out"),
+        };
+        let rect = egui::Rect::from_center_size(pos, egui::Vec2::splat(interact_diameter));
+        (ix, ui.interact(rect, id.with(ix), egui::Sense::hover()))
+    };
 
     SocketResponses {
-        inputs: input_responses,
-        outputs: output_responses,
+        inputs: node_sockets
+            .inputs()
+            .map(|(ix, pos, normal)| socket(SocketKind::Input, ix, pos, normal))
+            .collect(),
+        outputs: node_sockets
+            .outputs()
+            .map(|(ix, pos, normal)| socket(SocketKind::Output, ix, pos, normal))
+            .collect(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Socket, SocketKind};
+    use crate::node::{EdgeEvent, Node, NodeId};
+    use crate::{Graph, View};
+
+    /// A graph of nodes `A` and `B`, driven one pass at a time.
+    struct TestGraph {
+        ctx: egui::Context,
+        view: View,
+        immutable: bool,
+    }
+
+    /// The graph state observed at the end of a pass.
+    struct Pass {
+        /// The screen position and normal of the output of `A`.
+        a_out: (egui::Pos2, egui::Vec2),
+        /// The screen position and normal of the input of `B`.
+        b_in: (egui::Pos2, egui::Vec2),
+        closest_socket: Option<Socket>,
+        /// Whether the hover response of the input of `B` is hovered.
+        b_in_hovered: bool,
+        a_edge_event: Option<EdgeEvent>,
+        b_edge_event: Option<EdgeEvent>,
+    }
+
+    const GRAPH: &str = "graph";
+    const SCREEN: egui::Rect = egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(800.0, 600.0));
+    /// Has one output on its right edge.
+    const A: NodeId = NodeId(0);
+    /// Has one input on its left edge, to the right of `A`.
+    const B: NodeId = NodeId(1);
+    const B_IN: Socket = Socket {
+        node: B,
+        kind: SocketKind::Input,
+        index: 0,
+    };
+    /// The distance of a point from a socket along its normal, within the
+    /// drawn socket.
+    const NEAR: f32 = 2.0;
+
+    /// Lay out a new graph over two passes, since sizes settle after the first.
+    fn test_graph(immutable: bool) -> (TestGraph, Pass) {
+        let view = View {
+            scene_rect: SCREEN,
+            layout: [(A, egui::pos2(100.0, 100.0)), (B, egui::pos2(400.0, 100.0))].into(),
+        };
+        let mut g = TestGraph {
+            ctx: egui::Context::default(),
+            view,
+            immutable,
+        };
+        pass(&mut g, vec![]);
+        let p = pass(&mut g, vec![]);
+        (g, p)
+    }
+
+    /// Run one pass of the graph with the given input events.
+    fn pass(g: &mut TestGraph, events: Vec<egui::Event>) -> Pass {
+        let input = egui::RawInput {
+            screen_rect: Some(SCREEN),
+            events,
+            ..Default::default()
+        };
+        let mut out = None;
+        let _ = g.ctx.run_ui(input, |ui| {
+            let graph = Graph::new(GRAPH).immutable(g.immutable);
+            graph.show(&mut g.view, ui, |ui, show| {
+                let mut nodes = None;
+                show.nodes(ui, |nctx, ui| {
+                    nodes = Some([(A, 0, 1), (B, 1, 0)].map(|(id, inputs, outputs)| {
+                        let node = Node::from_id(id).inputs(inputs).outputs(outputs);
+                        node.show(nctx, ui, |c| c.framed(|ui, _| ui.label("x")))
+                    }));
+                });
+                let [a, b] = nodes.expect("the nodes ran");
+                let to_screen = ui
+                    .ctx()
+                    .layer_transform_to_global(ui.layer_id())
+                    .unwrap_or_default();
+                let screen = |(pos, normal)| (to_screen.mul_pos(pos), normal);
+                let gmem_arc = crate::memory(ui, crate::id(GRAPH));
+                let gmem = gmem_arc.lock().expect("failed to lock graph temp memory");
+                out = Some(Pass {
+                    a_out: screen(gmem.sockets[&A].output(0).expect("A has an output")),
+                    b_in: screen(gmem.sockets[&B].input(0).expect("B has an input")),
+                    closest_socket: gmem.closest_socket,
+                    b_in_hovered: b.sockets().input(0).is_some_and(|r| r.hovered()),
+                    a_edge_event: a.edge_event(),
+                    b_edge_event: b.edge_event(),
+                });
+            });
+        });
+        out.expect("the graph ran")
+    }
+
+    /// Move the pointer to `pos`, then run a second pass, since pointer
+    /// coverage of node frames takes effect on the next pass.
+    fn hover(g: &mut TestGraph, pos: egui::Pos2) -> Pass {
+        pass(g, vec![egui::Event::PointerMoved(pos)]);
+        pass(g, vec![])
+    }
+
+    /// A press or release of the primary button at `pos`.
+    fn primary(pos: egui::Pos2, pressed: bool) -> egui::Event {
+        egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        }
+    }
+
+    /// A point just outside the node frame, on the socket.
+    fn off_frame((pos, normal): (egui::Pos2, egui::Vec2)) -> egui::Pos2 {
+        pos + normal * NEAR
+    }
+
+    /// A point just inside the node frame, near the socket.
+    fn on_frame((pos, normal): (egui::Pos2, egui::Vec2)) -> egui::Pos2 {
+        pos - normal * NEAR
+    }
+
+    /// Off the frame, a press starts an edge, so the socket is detected. Its
+    /// response is hovered, for tooltips.
+    #[test]
+    fn hover_off_frame_detects_socket() {
+        let (mut g, p) = test_graph(false);
+        let p = hover(&mut g, off_frame(p.b_in));
+        assert_eq!(p.closest_socket, Some(B_IN));
+        assert!(p.b_in_hovered);
+    }
+
+    /// On the frame, a press drags the node, so the socket is not detected.
+    /// Its response is not hovered.
+    #[test]
+    fn hover_on_frame_skips_socket() {
+        let (mut g, p) = test_graph(false);
+        let p = hover(&mut g, on_frame(p.b_in));
+        assert_eq!(p.closest_socket, None);
+        assert!(!p.b_in_hovered);
+    }
+
+    /// An immutable graph cannot start an edge, so no socket is detected.
+    #[test]
+    fn immutable_hover_skips_socket() {
+        let (mut g, p) = test_graph(true);
+        let p = hover(&mut g, off_frame(p.b_in));
+        assert_eq!(p.closest_socket, None);
+    }
+
+    /// A press on a socket starts an edge. While the edge is in progress, a
+    /// socket is detected from inside its node frame, and a release there
+    /// ends the edge on it.
+    #[test]
+    fn edge_drag_detects_socket_on_frame() {
+        let (mut g, p) = test_graph(false);
+        let start = off_frame(p.a_out);
+        let end = on_frame(p.b_in);
+        hover(&mut g, start);
+        let p = pass(&mut g, vec![primary(start, true)]);
+        assert_eq!(
+            p.a_edge_event,
+            Some(EdgeEvent::Started {
+                kind: SocketKind::Output,
+                index: 0,
+            })
+        );
+        let p = hover(&mut g, end);
+        assert_eq!(p.closest_socket, Some(B_IN));
+        let p = pass(&mut g, vec![primary(end, false)]);
+        assert_eq!(
+            p.b_edge_event,
+            Some(EdgeEvent::Ended {
+                kind: SocketKind::Input,
+                index: 0,
+            })
+        );
     }
 }
