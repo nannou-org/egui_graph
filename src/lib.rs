@@ -168,6 +168,11 @@ pub struct GraphTempMemory {
     /// Primarily used to check for node selection, as we don't know the size of the node until the
     /// contents have been instantiated.
     node_sizes: NodeSizes,
+    /// The position of each node when its size was recorded.
+    ///
+    /// Used to move the recorded sockets of a node that moves while out of
+    /// view, as it does not resolve its sockets again.
+    node_positions: HashMap<NodeId, egui::Pos2>,
     /// The currently selected nodes and edges.
     selection: Selection,
     /// Whether or not the primary button was pressed on the graph area and is still down.
@@ -329,6 +334,10 @@ pub struct EdgesCtx {
     graph_rect: egui::Rect,
     selection_rect: Option<egui::Rect>,
     closest_socket: Option<socket::Socket>,
+    /// Whether an edge is in progress. Found once for all edges of the frame.
+    edge_in_progress: bool,
+    /// The graph's temporary memory. Fetched once for all edges of the frame.
+    memory: Arc<Mutex<GraphTempMemory>>,
     /// Whether the graph is in immutable (view-only) mode.
     pub immutable: bool,
 }
@@ -992,6 +1001,13 @@ impl GraphTempMemory {
 }
 
 impl NodeSockets {
+    /// Move all sockets by `delta`.
+    fn translate(&mut self, delta: egui::Vec2) {
+        for pos in self.inputs.values_mut().chain(self.outputs.values_mut()) {
+            *pos += delta;
+        }
+    }
+
     /// The screen position and normal of the input at the given index.
     ///
     /// Returns `None` if there is no input at the given index.
@@ -1094,11 +1110,18 @@ impl<'a> Show<'a> {
                 immutable,
                 ..
             } = self;
+            let memory = memory(ui, graph_id);
+            let edge_in_progress = {
+                let gmem = memory.lock().expect("failed to lock graph temp memory");
+                edge_in_progress(&gmem).is_some()
+            };
             let mut ctx = EdgesCtx {
                 graph_id,
                 graph_rect,
                 selection_rect,
                 closest_socket,
+                edge_in_progress,
+                memory,
                 immutable,
             };
             content(&mut ctx, ui);
@@ -1114,6 +1137,7 @@ fn prune_unused_nodes(graph_id: egui::Id, visited: &HashSet<NodeId>, ui: &mut eg
     let mut gmem = gmem_arc.lock().expect("failed to lock graph temp memory");
     gmem.node_sizes.retain(|k, _| visited.contains(k));
     gmem.sockets.retain(|k, _| visited.contains(k));
+    gmem.node_positions.retain(|k, _| visited.contains(k));
     gmem.selection.nodes.retain(|k| visited.contains(k));
     if let Some(socket) = gmem.closest_socket.as_ref() {
         if !visited.contains(&socket.node) {
@@ -1172,38 +1196,25 @@ impl EdgesCtx {
     pub fn in_progress(&self, ui: &egui::Ui) -> Option<EdgeInProgress> {
         let gmem_arc = memory(ui, self.graph_id);
         let gmem = gmem_arc.lock().expect("failed to lock graph temp memory");
-        let pressed = gmem.pressed.as_ref()?;
-        let start = match pressed.action {
-            PressAction::Socket(socket) => {
-                let sockets = gmem.sockets.get(&socket.node)?;
-                let (pos, normal) = match socket.kind {
-                    socket::SocketKind::Input => sockets.input(socket.index)?,
-                    socket::SocketKind::Output => sockets.output(socket.index)?,
-                };
-                socket::PositionedSocket {
-                    socket,
-                    pos,
-                    normal,
-                }
-            }
-            _ => return None,
-        };
-        let (end_pos, end_socket) = match gmem.closest_socket {
-            Some(socket) if socket.kind != start.socket.kind => {
-                let sockets = gmem.sockets.get(&socket.node)?;
-                let (pos, normal) = match socket.kind {
-                    socket::SocketKind::Input => sockets.input(socket.index)?,
-                    socket::SocketKind::Output => sockets.output(socket.index)?,
-                };
-                (pos, Some((socket.kind, normal)))
-            }
-            _ => (pressed.current_pos, None),
-        };
-        Some(EdgeInProgress {
-            start,
-            end_pos,
-            end_socket,
-        })
+        edge_in_progress(&gmem)
+    }
+
+    /// The position and normal of output `a` and input `b`, for an edge from
+    /// `a` to `b`.
+    ///
+    /// Returns `None` if either socket does not exist.
+    fn edge_sockets(
+        &self,
+        (a, output): (NodeId, usize),
+        (b, input): (NodeId, usize),
+    ) -> Option<((egui::Pos2, egui::Vec2), (egui::Pos2, egui::Vec2))> {
+        let gmem = self
+            .memory
+            .lock()
+            .expect("failed to lock graph temp memory");
+        let a_out = gmem.sockets.get(&a)?.output(output)?;
+        let b_in = gmem.sockets.get(&b)?.input(input)?;
+        Some((a_out, b_in))
     }
 
     /// The full rect occuppied by the graph widget.
@@ -1278,6 +1289,42 @@ impl Default for AutoPan {
     fn default() -> Self {
         Self::DEFAULT
     }
+}
+
+/// The edge that the user is in the progress of creating, if any.
+fn edge_in_progress(gmem: &GraphTempMemory) -> Option<EdgeInProgress> {
+    let pressed = gmem.pressed.as_ref()?;
+    let start = match pressed.action {
+        PressAction::Socket(socket) => {
+            let sockets = gmem.sockets.get(&socket.node)?;
+            let (pos, normal) = match socket.kind {
+                socket::SocketKind::Input => sockets.input(socket.index)?,
+                socket::SocketKind::Output => sockets.output(socket.index)?,
+            };
+            socket::PositionedSocket {
+                socket,
+                pos,
+                normal,
+            }
+        }
+        _ => return None,
+    };
+    let (end_pos, end_socket) = match gmem.closest_socket {
+        Some(socket) if socket.kind != start.socket.kind => {
+            let sockets = gmem.sockets.get(&socket.node)?;
+            let (pos, normal) = match socket.kind {
+                socket::SocketKind::Input => sockets.input(socket.index)?,
+                socket::SocketKind::Output => sockets.output(socket.index)?,
+            };
+            (pos, Some((socket.kind, normal)))
+        }
+        _ => (pressed.current_pos, None),
+    };
+    Some(EdgeInProgress {
+        start,
+        end_pos,
+        end_socket,
+    })
 }
 
 /// Find the socket that is closest to the given point.

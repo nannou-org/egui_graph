@@ -227,6 +227,14 @@ impl Path {
         &self.segments
     }
 
+    /// The bounds of the control points of all segments, which contain the
+    /// whole path.
+    pub(crate) fn max_bounds(&self) -> egui::Rect {
+        self.segments
+            .iter()
+            .fold(egui::Rect::NOTHING, |r, seg| r.union(seg.max_bounds()))
+    }
+
     /// Flatten the path into a list of points, ready to draw a polyline.
     ///
     /// See [`Cubic::flatten`]. Joint points shared by consecutive segments
