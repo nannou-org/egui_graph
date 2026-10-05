@@ -1,3 +1,6 @@
+// The README examples use the automatic layout.
+#![cfg_attr(feature = "layout", doc = include_str!("../README.md"))]
+
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::Hash;
 use std::sync::{Arc, Mutex};
@@ -1110,6 +1113,7 @@ fn prune_unused_nodes(graph_id: egui::Id, visited: &HashSet<NodeId>, ui: &mut eg
     let gmem_arc = memory(ui, graph_id);
     let mut gmem = gmem_arc.lock().expect("failed to lock graph temp memory");
     gmem.node_sizes.retain(|k, _| visited.contains(k));
+    gmem.sockets.retain(|k, _| visited.contains(k));
     gmem.selection.nodes.retain(|k| visited.contains(k));
     if let Some(socket) = gmem.closest_socket.as_ref() {
         if !visited.contains(&socket.node) {

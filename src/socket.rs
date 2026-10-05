@@ -133,9 +133,8 @@ pub(crate) fn show(
     socket_radius: f32,
 ) -> SocketResponses {
     // Phase A: Store resolved sockets and extract highlight state, then drop the lock.
-    let (pressed_socket, closest_socket) = if !node_sockets.inputs.is_empty()
-        || !node_sockets.outputs.is_empty()
-    {
+    // Store a node without sockets too, so that its old sockets are not kept.
+    let (pressed_socket, closest_socket) = {
         let gmem_arc = crate::memory(ui, graph_id);
         let mut gmem = gmem_arc.lock().expect("failed to lock graph temp memory");
         gmem.sockets.insert(node_id, node_sockets.clone());
@@ -161,8 +160,6 @@ pub(crate) fn show(
         };
 
         (pressed_socket, closest_socket)
-    } else {
-        (None, None)
     };
 
     let paint_highlight =
@@ -242,14 +239,16 @@ mod tests {
         ctx: egui::Context,
         view: View,
         immutable: bool,
+        /// The number of inputs of `B`, or `None` to not show `B`.
+        b_inputs: Option<usize>,
     }
 
     /// The graph state observed at the end of a pass.
     struct Pass {
         /// The screen position and normal of the output of `A`.
         a_out: (egui::Pos2, egui::Vec2),
-        /// The screen position and normal of the input of `B`.
-        b_in: (egui::Pos2, egui::Vec2),
+        /// The screen position and normal of the input of `B`, as edges see it.
+        b_in: Option<(egui::Pos2, egui::Vec2)>,
         closest_socket: Option<Socket>,
         /// Whether the hover response of the input of `B` is hovered.
         b_in_hovered: bool,
@@ -282,6 +281,7 @@ mod tests {
             ctx: egui::Context::default(),
             view,
             immutable,
+            b_inputs: Some(1),
         };
         pass(&mut g, vec![]);
         let p = pass(&mut g, vec![]);
@@ -295,18 +295,25 @@ mod tests {
             events,
             ..Default::default()
         };
+        let b_inputs = g.b_inputs;
         let mut out = None;
         let _ = g.ctx.run_ui(input, |ui| {
             let graph = Graph::new(GRAPH).immutable(g.immutable);
             graph.show(&mut g.view, ui, |ui, show| {
                 let mut nodes = None;
+                let mut sockets = None;
                 show.nodes(ui, |nctx, ui| {
-                    nodes = Some([(A, 0, 1), (B, 1, 0)].map(|(id, inputs, outputs)| {
+                    let mut node = |id, inputs, outputs| {
                         let node = Node::from_id(id).inputs(inputs).outputs(outputs);
                         node.show(nctx, ui, |c| c.framed(|ui, _| ui.label("x")))
-                    }));
+                    };
+                    nodes = Some((node(A, 0, 1), b_inputs.map(|n| node(B, n, 0))));
+                })
+                .edges(ui, |ectx, ui| {
+                    sockets = Some((ectx.output(ui, A, 0), ectx.input(ui, B, 0)));
                 });
-                let [a, b] = nodes.expect("the nodes ran");
+                let (a, b) = nodes.expect("the nodes ran");
+                let (a_out, b_in) = sockets.expect("the edges ran");
                 let to_screen = ui
                     .ctx()
                     .layer_transform_to_global(ui.layer_id())
@@ -314,13 +321,14 @@ mod tests {
                 let screen = |(pos, normal)| (to_screen.mul_pos(pos), normal);
                 let gmem_arc = crate::memory(ui, crate::id(GRAPH));
                 let gmem = gmem_arc.lock().expect("failed to lock graph temp memory");
+                let b_in_response = b.as_ref().and_then(|b| b.sockets().input(0));
                 out = Some(Pass {
-                    a_out: screen(gmem.sockets[&A].output(0).expect("A has an output")),
-                    b_in: screen(gmem.sockets[&B].input(0).expect("B has an input")),
+                    a_out: screen(a_out.expect("A has an output")),
+                    b_in: b_in.map(screen),
                     closest_socket: gmem.closest_socket,
-                    b_in_hovered: b.sockets().input(0).is_some_and(|r| r.hovered()),
+                    b_in_hovered: b_in_response.is_some_and(|r| r.hovered()),
                     a_edge_event: a.edge_event(),
-                    b_edge_event: b.edge_event(),
+                    b_edge_event: b.and_then(|b| b.edge_event()),
                 });
             });
         });
@@ -354,12 +362,17 @@ mod tests {
         pos - normal * NEAR
     }
 
+    /// The screen position and normal of the input of `B`.
+    fn b_in(p: &Pass) -> (egui::Pos2, egui::Vec2) {
+        p.b_in.expect("B has an input")
+    }
+
     /// Off the frame, a press starts an edge, so the socket is detected. Its
     /// response is hovered, for tooltips.
     #[test]
     fn hover_off_frame_detects_socket() {
         let (mut g, p) = test_graph(false);
-        let p = hover(&mut g, off_frame(p.b_in));
+        let p = hover(&mut g, off_frame(b_in(&p)));
         assert_eq!(p.closest_socket, Some(B_IN));
         assert!(p.b_in_hovered);
     }
@@ -369,7 +382,7 @@ mod tests {
     #[test]
     fn hover_on_frame_skips_socket() {
         let (mut g, p) = test_graph(false);
-        let p = hover(&mut g, on_frame(p.b_in));
+        let p = hover(&mut g, on_frame(b_in(&p)));
         assert_eq!(p.closest_socket, None);
         assert!(!p.b_in_hovered);
     }
@@ -378,7 +391,7 @@ mod tests {
     #[test]
     fn immutable_hover_skips_socket() {
         let (mut g, p) = test_graph(true);
-        let p = hover(&mut g, off_frame(p.b_in));
+        let p = hover(&mut g, off_frame(b_in(&p)));
         assert_eq!(p.closest_socket, None);
     }
 
@@ -389,7 +402,7 @@ mod tests {
     fn edge_drag_detects_socket_on_frame() {
         let (mut g, p) = test_graph(false);
         let start = off_frame(p.a_out);
-        let end = on_frame(p.b_in);
+        let end = on_frame(b_in(&p));
         hover(&mut g, start);
         let p = pass(&mut g, vec![primary(start, true)]);
         assert_eq!(
@@ -409,5 +422,28 @@ mod tests {
                 index: 0,
             })
         );
+    }
+
+    /// A node that no longer has sockets keeps none for edges or detection.
+    #[test]
+    fn socketless_node_keeps_no_sockets() {
+        let (mut g, p) = test_graph(false);
+        let old_b_in = b_in(&p);
+        g.b_inputs = Some(0);
+        let p = hover(&mut g, off_frame(old_b_in));
+        assert_eq!(p.b_in, None);
+        assert_eq!(p.closest_socket, None);
+    }
+
+    /// A node that is no longer shown keeps no sockets in graph memory.
+    #[test]
+    fn removed_node_keeps_no_sockets() {
+        let (mut g, _) = test_graph(false);
+        g.b_inputs = None;
+        pass(&mut g, vec![]);
+        let has_b = crate::with_graph_memory(&g.ctx, crate::id(GRAPH), |gmem| {
+            gmem.node_sockets().contains_key(&B)
+        });
+        assert!(!has_b);
     }
 }
