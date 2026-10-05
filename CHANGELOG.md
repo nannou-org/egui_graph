@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.5](https://github.com/nannou-org/egui_graph/compare/v0.16.4...v0.16.5) - 2026-10-05
+
+### Added
+
+- *(demo)* skip the content of nodes out of view
+- *(demo)* add an auto-pan toggle
+- *(graph)* pan the view while a drag nears the edge
+
+### Fixed
+
+- *(node)* keep `NodeId::new` ids the same across Rust releases
+- *(socket)* drop the stored sockets of removed and socketless nodes
+- *(graph)* paint the selection area above the nodes
+- *(socket)* start an edge on a press on a drawn socket
+- *(socket)* skip socket highlight in an immutable graph
+- *(socket)* skip socket highlight over a node frame when idle
+
+### Other
+
+- *(node)* skip the work of nodes out of view
+- *(edge)* skip curve work for edges out of view or out of reach
+- fix the README examples and use the README as the crate docs
+- *(graph)* share the scene fit scale
+
 ## [0.16.4](https://github.com/nannou-org/egui_graph/compare/v0.16.3...v0.16.4) - 2026-09-29
 
 ### Added
