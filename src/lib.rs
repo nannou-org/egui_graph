@@ -855,9 +855,8 @@ impl Graph {
             }
 
             // Draw the selection area if there is one.
-            // TODO: Do this when `Show` is `drop`ped or finalised.
             if let Some(sel_rect) = selection_rect {
-                paint_selection_area(sel_rect, ui);
+                paint_selection_area(sel_rect, self.id, ui);
             }
 
             let mut visited = HashSet::default();
@@ -1418,14 +1417,32 @@ fn paint_background(visible_rect: egui::Rect, ui: &mut egui::Ui) {
         .rect(visible_rect, 0.0, fill, stroke, egui::StrokeKind::Inside);
 }
 
-/// Paint the selection area rectangle.
-fn paint_selection_area(sel_rect: egui::Rect, ui: &mut egui::Ui) {
+/// Paint the selection area rectangle above the nodes.
+///
+/// The rectangle paints on a sublayer of the ui's layer, as do the node
+/// frames and sockets. `move_to_top` sorts it after those sibling sublayers,
+/// and egui keeps all sublayers directly above their parent, so areas such
+/// as windows above the graph stay above the rectangle.
+fn paint_selection_area(sel_rect: egui::Rect, graph_id: egui::Id, ui: &egui::Ui) {
+    let parent = ui.layer_id();
+    let layer = egui::LayerId::new(parent.order, graph_id.with("selection"));
+    let ctx = ui.ctx();
+    ctx.set_sublayer(parent, layer);
+    ctx.move_to_top(layer);
+    if let Some(transform) = ctx.layer_transform_to_global(parent) {
+        ctx.set_transform_layer(layer, transform);
+    }
     let color = ui.visuals().weak_text_color();
     let fill = color.linear_multiply(0.125);
     let width = 1.0;
     let stroke = egui::Stroke { width, color };
-    ui.painter()
-        .rect(sel_rect, 0.0, fill, stroke, egui::StrokeKind::Inside);
+    ui.painter().clone().with_layer_id(layer).rect(
+        sel_rect,
+        0.0,
+        fill,
+        stroke,
+        egui::StrokeKind::Inside,
+    );
 }
 
 /// Combines the given id src with the `TypeId` of the `Graph` to produce a unique `egui::Id`.
@@ -2127,5 +2144,91 @@ mod tests {
             None,
         );
         assert_eq!(layout, before);
+    }
+
+    mod selection_area {
+        use crate::node::{Node, NodeId};
+        use crate::{Graph, View};
+        use egui::epaint::ClippedShape;
+
+        const SCREEN: egui::Rect =
+            egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(800.0, 600.0));
+        /// A point on the scene background, above and left of the nodes.
+        const START: egui::Pos2 = egui::pos2(50.0, 50.0);
+        /// A point below and right of the nodes.
+        const END: egui::Pos2 = egui::pos2(500.0, 300.0);
+
+        /// Drag a selection area over two nodes, and return the shapes of the
+        /// last pass with the style that painted them. With `window`, a window
+        /// floats above the graph.
+        fn drag_selection(window: bool) -> (Vec<ClippedShape>, std::sync::Arc<egui::Style>) {
+            let ctx = egui::Context::default();
+            let mut view = View {
+                scene_rect: SCREEN,
+                layout: [
+                    (NodeId(0), egui::pos2(100.0, 100.0)),
+                    (NodeId(1), egui::pos2(300.0, 100.0)),
+                ]
+                .into(),
+            };
+            let mut pass = |events: Vec<egui::Event>| {
+                let input = egui::RawInput {
+                    screen_rect: Some(SCREEN),
+                    events,
+                    ..Default::default()
+                };
+                ctx.run_ui(input, |ui| {
+                    Graph::new("graph").show(&mut view, ui, |ui, show| {
+                        show.nodes(ui, |nctx, ui| {
+                            for id in [NodeId(0), NodeId(1)] {
+                                let node = Node::from_id(id).inputs(1).outputs(1);
+                                node.show(nctx, ui, |c| c.framed(|ui, _| ui.label("x")));
+                            }
+                        });
+                    });
+                    if window {
+                        egui::Window::new("window")
+                            .fixed_pos(egui::pos2(200.0, 150.0))
+                            .show(ui.ctx(), |ui| ui.label("window"));
+                    }
+                })
+                .shapes
+            };
+            pass(vec![egui::Event::PointerMoved(START)]);
+            pass(vec![]);
+            pass(vec![egui::Event::PointerButton {
+                pos: START,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            }]);
+            let shapes = pass(vec![egui::Event::PointerMoved(END)]);
+            (shapes, ctx.global_style())
+        }
+
+        /// The index of the selection area among the shapes.
+        fn selection_ix(shapes: &[ClippedShape], style: &egui::Style) -> Option<usize> {
+            let fill = style.visuals.weak_text_color().linear_multiply(0.125);
+            shapes
+                .iter()
+                .position(|s| matches!(&s.shape, egui::Shape::Rect(r) if r.fill == fill))
+        }
+
+        /// The selection area paints after the node frames, content and
+        /// sockets.
+        #[test]
+        fn paints_above_nodes() {
+            let (shapes, style) = drag_selection(false);
+            assert_eq!(selection_ix(&shapes, &style), Some(shapes.len() - 1));
+        }
+
+        /// A window above the graph paints after the selection area.
+        #[test]
+        fn paints_below_windows() {
+            let (shapes, style) = drag_selection(true);
+            let ix = selection_ix(&shapes, &style).expect("the selection area is painted");
+            let window_text = |s: &ClippedShape| matches!(&s.shape, egui::Shape::Text(t) if t.galley.text() == "window");
+            assert!(shapes[ix + 1..].iter().any(window_text));
+        }
     }
 }
