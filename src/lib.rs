@@ -168,6 +168,11 @@ pub struct GraphTempMemory {
     /// Primarily used to check for node selection, as we don't know the size of the node until the
     /// contents have been instantiated.
     node_sizes: NodeSizes,
+    /// The position of each node when its size was recorded.
+    ///
+    /// Used to move the recorded sockets of a node that moves while out of
+    /// view, as it does not resolve its sockets again.
+    node_positions: HashMap<NodeId, egui::Pos2>,
     /// The currently selected nodes and edges.
     selection: Selection,
     /// Whether or not the primary button was pressed on the graph area and is still down.
@@ -996,6 +1001,13 @@ impl GraphTempMemory {
 }
 
 impl NodeSockets {
+    /// Move all sockets by `delta`.
+    fn translate(&mut self, delta: egui::Vec2) {
+        for pos in self.inputs.values_mut().chain(self.outputs.values_mut()) {
+            *pos += delta;
+        }
+    }
+
     /// The screen position and normal of the input at the given index.
     ///
     /// Returns `None` if there is no input at the given index.
@@ -1125,6 +1137,7 @@ fn prune_unused_nodes(graph_id: egui::Id, visited: &HashSet<NodeId>, ui: &mut eg
     let mut gmem = gmem_arc.lock().expect("failed to lock graph temp memory");
     gmem.node_sizes.retain(|k, _| visited.contains(k));
     gmem.sockets.retain(|k, _| visited.contains(k));
+    gmem.node_positions.retain(|k, _| visited.contains(k));
     gmem.selection.nodes.retain(|k| visited.contains(k));
     if let Some(socket) = gmem.closest_socket.as_ref() {
         if !visited.contains(&socket.node) {

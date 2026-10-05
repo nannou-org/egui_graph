@@ -33,6 +33,9 @@ pub struct PositionedSocket {
 ///
 /// Each socket is allocated as an interactive widget (with [`egui::Sense::hover`]),
 /// enabling standard egui interactions like tooltips and hover detection.
+///
+/// A node out of view of its graph has no socket responses.
+#[derive(Default)]
 pub struct SocketResponses {
     inputs: std::collections::BTreeMap<usize, egui::Response>,
     outputs: std::collections::BTreeMap<usize, egui::Response>,
@@ -72,6 +75,11 @@ pub fn socket_padding(style: &egui::Style) -> f32 {
         .x
         .min(style.spacing.interact_size.y);
     style.visuals.window_corner_radius.ne as f32 + min_interact_len * 0.5
+}
+
+/// The radius of the faded semicircle behind a highlighted socket.
+pub(crate) fn highlight_radius(socket_radius: f32) -> f32 {
+    (socket_radius + 4.0).max(4.0)
 }
 
 /// Adaptive segment count for a semicircle, matching egui's circle tessellation
@@ -132,12 +140,10 @@ pub(crate) fn show(
     socket_color: egui::Color32,
     socket_radius: f32,
 ) -> SocketResponses {
-    // Phase A: Store resolved sockets and extract highlight state, then drop the lock.
-    // Store a node without sockets too, so that its old sockets are not kept.
+    // Phase A: Extract highlight state, then drop the lock.
     let (pressed_socket, closest_socket) = {
         let gmem_arc = crate::memory(ui, graph_id);
-        let mut gmem = gmem_arc.lock().expect("failed to lock graph temp memory");
-        gmem.sockets.insert(node_id, node_sockets.clone());
+        let gmem = gmem_arc.lock().expect("failed to lock graph temp memory");
 
         let pressed_socket = gmem
             .pressed
@@ -194,7 +200,7 @@ pub(crate) fn paint(
     socket_radius: f32,
     highlight: impl Fn(SocketKind, usize) -> bool,
 ) -> SocketResponses {
-    let hl_size = (socket_radius + 4.0).max(4.0);
+    let hl_size = highlight_radius(socket_radius);
     let interact_diameter = ui
         .spacing()
         .interact_size
