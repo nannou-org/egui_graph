@@ -944,6 +944,7 @@ dependencies = [
  "env_logger",
  "petgraph",
  "serde",
+ "siphasher",
 ]
 
 [[package]]

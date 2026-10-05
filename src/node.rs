@@ -624,9 +624,17 @@ impl Node {
 
 impl NodeId {
     /// Create a new NodeId by hashing any hashable value.
+    ///
+    /// The id is the SipHash-1-3 hash of the value, with zero keys. This hash
+    /// does not change between Rust releases, so ids made from the same value
+    /// can be saved and used again by a later build, e.g. as the keys of a
+    /// serialized [`View`](crate::View) layout.
+    ///
+    /// The id also depends on the [`Hash`] impl of the value. For example, a
+    /// `usize` gives a different id on 32-bit and 64-bit targets.
     pub fn new(id_src: impl Hash) -> Self {
         use std::hash::Hasher;
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        let mut hasher = siphasher::sip::SipHasher13::new();
         id_src.hash(&mut hasher);
         NodeId(hasher.finish())
     }
@@ -933,5 +941,24 @@ mod tests {
                 .show_static(ui, |c| c.framed(|ui, _| enabled = Some(ui.is_enabled())));
         });
         assert_eq!(enabled, Some(false));
+    }
+
+    /// Ids made from a value stay the same, so saved layouts stay valid. These
+    /// are the ids that `std::hash::DefaultHasher` gave in Rust 1.94.
+    #[test]
+    fn node_id_new_is_stable() {
+        let cases = [
+            (NodeId::new("node_1"), 0x8448cd7200baabf5),
+            (NodeId::new(""), 0x30406ea523c53def),
+            (
+                NodeId::new("a longer id that spans several words"),
+                0x8d53347dbcaf72d1,
+            ),
+            (NodeId::new(0u64), 0xbd60acb658c79e45),
+            (NodeId::new(("graph", 7u32)), 0x6771a91e081e9a6b),
+        ];
+        for (id, expected) in cases {
+            assert_eq!(id.value(), expected);
+        }
     }
 }
