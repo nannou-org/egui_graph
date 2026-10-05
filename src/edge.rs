@@ -33,7 +33,11 @@ pub struct EdgeResponse {
     response: egui::Response,
     changed: bool,
     deleted: bool,
-    closest_point: egui::Pos2,
+    /// The path of the edge, or `None` if either socket does not exist.
+    path: Option<bezier::Path>,
+    /// The pointer position, from which to find the closest point on the path.
+    pointer: egui::Pos2,
+    distance_per_point: f32,
 }
 
 /// The resolved inputs for painting an edge, handed to the closure given to
@@ -163,7 +167,8 @@ impl<'a> Edge<'a> {
     /// Interaction (hover, selection, deletion) is identical to [`Edge::show`].
     /// The `paint` closure receives the resolved paint inputs - see
     /// [`EdgePaintCtx`]. It is not called when either socket position is
-    /// unavailable, in which case there is nothing to paint.
+    /// unavailable, in which case there is nothing to paint. It is also not
+    /// called when the edge is outside the visible area of the graph.
     pub fn show_with(
         self,
         ectx: &mut EdgesCtx,
@@ -181,47 +186,62 @@ impl<'a> Edge<'a> {
             selected,
         } = self;
 
-        // Retrieve the location and direction of the node sockets.
-        // If either socket position is unavailable (e.g. sparse explicit
-        // layout), skip rendering entirely.
-        let (a_out, b_in) = match (ectx.output(ui, a, output), ectx.input(ui, b, input)) {
-            (Some(a_out), Some(b_in)) => (a_out, b_in),
-            _ => {
-                let edge_id = ui.id().with(("edge", a, output, b, input));
-                let response = ui.interact(egui::Rect::NOTHING, edge_id, egui::Sense::click());
-                return EdgeResponse {
-                    response,
-                    changed: false,
-                    deleted: false,
-                    closest_point: egui::Pos2::ZERO,
-                };
-            }
-        };
-
-        // TODO: Cache the curve and its points?
-        let path = bezier::Path::from_edge_points_via(a_out, waypoints, b_in, curvature);
-
         // Get the mouse position for computing the closest point on the edge.
         let ui_response = ui.response();
         let mouse_pos = ui_response
             .interact_pointer_pos()
             .or(ui_response.hover_pos())
             .unwrap_or_default();
-        let closest_point = path.closest_point(distance_per_point, mouse_pos);
+
+        // Retrieve the location and direction of the node sockets.
+        // If either socket position is unavailable (e.g. sparse explicit
+        // layout), skip rendering entirely.
+        let edge_id = ui.id().with(("edge", a, output, b, input));
+        let Some((a_out, b_in)) = ectx.edge_sockets((a, output), (b, input)) else {
+            let response = ui.interact(egui::Rect::NOTHING, edge_id, egui::Sense::click());
+            return EdgeResponse {
+                response,
+                changed: false,
+                deleted: false,
+                path: None,
+                pointer: mouse_pos,
+                distance_per_point,
+            };
+        };
+
+        let path = bezier::Path::from_edge_points_via(a_out, waypoints, b_in, curvature);
+
+        // The curve lies within the bounds of its control points. Only flatten
+        // the curve to paint it within the visible area, or to find its point
+        // closest to a pointer within reach.
+        let select_dist = ui.style().interaction.interact_radius;
+        let reach = path.max_bounds().expand(select_dist);
+        let near_pointer = reach.contains(mouse_pos);
+        let visible = ui.clip_rect().intersects(reach);
+        let pts: Vec<_> = if visible || near_pointer {
+            path.flatten(distance_per_point).collect()
+        } else {
+            Vec::new()
+        };
 
         // Create a per-edge response for interaction and context menu support.
         // The interact area follows the mouse along the edge curve.
-        let select_dist = ui.style().interaction.interact_radius;
-        let edge_id = ui.id().with(("edge", a, output, b, input));
-        let interact_rect = egui::Rect::from_center_size(
-            closest_point,
-            egui::vec2(select_dist * 2.0, select_dist * 2.0),
-        );
+        let closest_point = if near_pointer {
+            let dist_sq = |p: &egui::Pos2| p.distance_sq(mouse_pos);
+            pts.iter()
+                .copied()
+                .min_by(|p, q| dist_sq(p).total_cmp(&dist_sq(q)))
+        } else {
+            None
+        };
+        let interact_rect = closest_point.map_or(egui::Rect::NOTHING, |p| {
+            egui::Rect::from_center_size(p, egui::Vec2::splat(select_dist * 2.0))
+        });
         let response = ui.interact(interact_rect, edge_id, egui::Sense::click());
 
         // Determine if edge interactions should be processed.
         // Disable when drawing a new edge or when close to a socket.
-        let edge_in_progress = ectx.in_progress(ui).is_some();
+        let edge_in_progress = ectx.edge_in_progress;
         let can_interact = !edge_in_progress && ectx.closest_socket.is_none();
         let clicked = can_interact && response.clicked();
 
@@ -265,8 +285,7 @@ impl<'a> Edge<'a> {
             && response.hovered()
             && ui.input(|i| !i.pointer.primary_down() || i.pointer.could_any_button_be_click());
 
-        // Paint the edge.
-        let pts: Vec<_> = path.flatten(distance_per_point).collect();
+        // Paint the edge if it is within the visible area.
         let hovered = show_hover || (under_selection_rect && ui.input(|i| i.modifiers.shift));
         let stroke = if *selected {
             selected_stroke.unwrap_or(ui.style().visuals.selection.stroke)
@@ -275,16 +294,16 @@ impl<'a> Edge<'a> {
         } else {
             stroke.unwrap_or(ui.style().visuals.widgets.noninteractive.fg_stroke)
         };
-        paint(
-            ui,
-            EdgePaintCtx {
+        if visible {
+            let cx = EdgePaintCtx {
                 path: &path,
                 points: &pts,
                 selected: *selected,
                 hovered,
                 stroke,
-            },
-        );
+            };
+            paint(ui, cx);
+        }
 
         // Construct and return the response.
         let changed = old_selected != *selected;
@@ -292,7 +311,9 @@ impl<'a> Edge<'a> {
             response,
             changed,
             deleted,
-            closest_point,
+            path: Some(path),
+            pointer: mouse_pos,
+            distance_per_point,
         }
     }
 }
@@ -309,8 +330,14 @@ impl EdgeResponse {
     }
 
     /// The position on the edge closest to the pointer.
+    ///
+    /// This is found on each call. It is `Pos2::ZERO` if either socket of the
+    /// edge does not exist.
     pub fn closest_point(&self) -> egui::Pos2 {
-        self.closest_point
+        let Some(path) = &self.path else {
+            return egui::Pos2::ZERO;
+        };
+        path.closest_point(self.distance_per_point, self.pointer)
     }
 }
 
@@ -324,5 +351,117 @@ impl ops::Deref for EdgeResponse {
 impl From<EdgeResponse> for egui::Response {
     fn from(response: EdgeResponse) -> Self {
         response.response
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Edge;
+    use crate::node::{Node, NodeId};
+    use crate::{Graph, View};
+
+    /// The edge state observed at the end of a pass.
+    struct Pass {
+        painted: bool,
+        hovered: bool,
+        closest_point: egui::Pos2,
+    }
+
+    const SCREEN: egui::Rect = egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(800.0, 600.0));
+    /// Has one output on its right edge.
+    const A: NodeId = NodeId(0);
+    /// Has one input on its left edge, level with and to the right of `A`.
+    const B: NodeId = NodeId(1);
+
+    /// Show `A`, `B` and an edge from `A` to `B` over a few passes, with the
+    /// view at `scene_rect` and the pointer at `pointer`.
+    fn show_edge(scene_rect: egui::Rect, pointer: egui::Pos2) -> Pass {
+        let ctx = egui::Context::default();
+        let mut view = View {
+            scene_rect,
+            layout: [(A, egui::pos2(100.0, 100.0)), (B, egui::pos2(400.0, 100.0))].into(),
+        };
+        let mut selected = false;
+        let mut out = None;
+        for _ in 0..3 {
+            let input = egui::RawInput {
+                screen_rect: Some(SCREEN),
+                events: vec![egui::Event::PointerMoved(pointer)],
+                ..Default::default()
+            };
+            let _ = ctx.run_ui(input, |ui| {
+                Graph::new("graph").show(&mut view, ui, |ui, show| {
+                    show.nodes(ui, |nctx, ui| {
+                        for (id, inputs, outputs) in [(A, 0, 1), (B, 1, 0)] {
+                            let node = Node::from_id(id).inputs(inputs).outputs(outputs);
+                            node.show(nctx, ui, |c| c.framed(|ui, _| ui.label("x")));
+                        }
+                    })
+                    .edges(ui, |ectx, ui| {
+                        let mut painted = false;
+                        let edge = Edge::new((A, 0), (B, 0), &mut selected);
+                        let response = edge.show_with(ectx, ui, |_, _| painted = true);
+                        out = Some(Pass {
+                            painted,
+                            hovered: response.hovered(),
+                            closest_point: response.closest_point(),
+                        });
+                    });
+                });
+            });
+        }
+        out.expect("the edges ran")
+    }
+
+    /// A point on the straight edge between the output of `A` and the input
+    /// of `B`, clear of both nodes.
+    fn on_edge() -> egui::Pos2 {
+        egui::pos2(300.0, 100.0 + node_height() / 2.0)
+    }
+
+    /// The height of a node with a single label, as laid out by the graph.
+    fn node_height() -> f32 {
+        let ctx = egui::Context::default();
+        let mut height = None;
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let node = Node::from_id(A).outputs(1);
+            let r = node.show_static(ui, |c| c.framed(|ui, _| ui.label("x")));
+            height = Some(r.inner.response.rect.height());
+        });
+        height.expect("the node ran")
+    }
+
+    /// An edge in view paints, and the pointer on it hovers it.
+    #[test]
+    fn edge_in_view_paints_and_hovers() {
+        let p = show_edge(SCREEN, on_edge());
+        assert!(p.painted);
+        assert!(p.hovered);
+        assert!(p.closest_point.distance(on_edge()) < 1.0);
+    }
+
+    /// An edge in view with the pointer away from it paints, but is not
+    /// hovered.
+    #[test]
+    fn edge_away_from_pointer_is_not_hovered() {
+        let p = show_edge(SCREEN, egui::pos2(300.0, 400.0));
+        assert!(p.painted);
+        assert!(!p.hovered);
+    }
+
+    /// An edge out of view does not paint. Its closest point to the pointer is
+    /// still found on demand: the input of `B`, as the pointer is beyond it.
+    #[test]
+    fn edge_out_of_view_does_not_paint() {
+        let away = SCREEN.translate(egui::vec2(2000.0, 2000.0));
+        let p = show_edge(away, SCREEN.center());
+        assert!(!p.painted);
+        assert!(!p.hovered);
+        let b_in = egui::pos2(400.0, on_edge().y);
+        assert!(
+            p.closest_point.distance(b_in) < 1.0,
+            "{:?}",
+            p.closest_point
+        );
     }
 }
