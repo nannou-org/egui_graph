@@ -62,6 +62,7 @@ struct State {
     routes: egui_graph::EdgeRoutes,
     node_id_map: HashMap<egui_graph::NodeId, NodeIndex>,
     center_view: bool,
+    auto_pan: bool,
     dot_grid: bool,
     immutable: bool,
     snap_mode: SnapMode,
@@ -140,6 +141,7 @@ impl App {
             routes: Default::default(),
             node_id_map: Default::default(),
             center_view: false,
+            auto_pan: true,
             dot_grid: true,
             immutable: false,
             snap_mode: SnapMode::Point,
@@ -336,6 +338,7 @@ fn gui(ui: &mut egui::Ui, view: &mut egui_graph::View, state: &mut State) {
 fn graph(ui: &mut egui::Ui, view: &mut egui_graph::View, state: &mut State) {
     let graph_response = egui_graph::Graph::from_id(graph_id())
         .center_view(state.center_view)
+        .auto_pan(state.auto_pan.then_some(egui_graph::AutoPan::DEFAULT))
         .dot_grid(state.dot_grid)
         .immutable(state.immutable)
         // Snap and the dot grid are independent options. In `Grid` mode the
@@ -588,6 +591,7 @@ fn graph_config(ui: &mut egui::Ui, view: &mut egui_graph::View, state: &mut Stat
             #[cfg(feature = "layout")]
             ui.checkbox(&mut state.route_edges, "Edge Routing");
             ui.checkbox(&mut state.center_view, "Center View");
+            ui.checkbox(&mut state.auto_pan, "Auto-Pan");
             ui.checkbox(&mut state.immutable, "Immutable");
             ui.horizontal(|ui| {
                 ui.label("Flow:");
