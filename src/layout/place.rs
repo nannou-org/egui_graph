@@ -8,7 +8,14 @@ use super::order::ProperGraph;
 /// Layers start packed at minimum separation, then alternating sweeps move
 /// each vertex toward the median of its fixed-side anchor targets, pushing
 /// strictly lower-priority vertices along and never violating separation.
-pub(super) fn assign_cross(g: &ProperGraph, size_cross: &[f32], node_gap: f32) -> Vec<f32> {
+/// With `straighten_edges`, a last pass then moves vertices to where more
+/// segments run straight. See [`straighten`].
+pub(super) fn assign_cross(
+    g: &ProperGraph,
+    size_cross: &[f32],
+    node_gap: f32,
+    straighten_edges: bool,
+) -> Vec<f32> {
     /// Placement settles quickly; further sweeps barely move vertices.
     const HALF_SWEEPS: usize = 4;
     let mut x = vec![0.0f32; size_cross.len()];
@@ -24,13 +31,16 @@ pub(super) fn assign_cross(g: &ProperGraph, size_cross: &[f32], node_gap: f32) -
     for sweep in 0..HALF_SWEEPS {
         if sweep % 2 == 0 {
             for l in 1..g.layers.len() {
-                place_layer(g, &mut x, size_cross, node_gap, l, true);
+                place_layer(g, &mut x, size_cross, node_gap, l, true, straighten_edges);
             }
         } else {
             for l in (0..g.layers.len().saturating_sub(1)).rev() {
-                place_layer(g, &mut x, size_cross, node_gap, l, false);
+                place_layer(g, &mut x, size_cross, node_gap, l, false, straighten_edges);
             }
         }
+    }
+    if straighten_edges {
+        straighten(g, &mut x, size_cross, node_gap);
     }
     x
 }
@@ -71,6 +81,7 @@ fn place_layer(
     node_gap: f32,
     l: usize,
     toward_back: bool,
+    straighten_edges: bool,
 ) {
     let layer = &g.layers[l];
     // Dummies have the highest priority (straightening long edges), then
@@ -96,6 +107,8 @@ fn place_layer(
             continue;
         }
         // Desired position: the median anchor-to-anchor alignment target.
+        // Between two middle targets, straightening takes the nearer one, so
+        // that one edge runs straight rather than neither.
         let mut targets: Vec<f32> = segs
             .iter()
             .map(|&s| {
@@ -111,13 +124,128 @@ fn place_layer(
         let mid = targets.len() / 2;
         let desired = if targets.len() % 2 == 1 {
             targets[mid]
-        } else {
+        } else if !straighten_edges {
             (targets[mid - 1] + targets[mid]) * 0.5
+        } else if (targets[mid - 1] - x[v]).abs() <= (targets[mid] - x[v]).abs() {
+            targets[mid - 1]
+        } else {
+            targets[mid]
         };
         nudge(
             x, size_cross, node_gap, g.num_real, layer, &prio, i, desired,
         );
     }
+}
+
+/// Move vertices to positions where more segments run straight.
+///
+/// A move may push the vertices beside it along the layer, as [`nudge`]
+/// does, so the layer order and the minimum separation hold. A move is taken
+/// only when it straightens more of the layer's edges, as [`targets`] weighs
+/// them, so the passes settle.
+fn straighten(g: &ProperGraph, x: &mut [f32], size_cross: &[f32], node_gap: f32) {
+    const PASSES: usize = 8;
+    /// Gains below this are float noise, not a straighter edge.
+    const MIN_GAIN: f32 = 1e-3;
+    for _ in 0..PASSES {
+        let mut moved = false;
+        for layer in &g.layers {
+            for i in 0..layer.len() {
+                let v = layer[i];
+                let best = targets(g, x, v)
+                    .map(|(t, _)| t)
+                    .filter(|&t| t != x[v])
+                    .map(|t| {
+                        let moves = pushed(g.num_real, size_cross, node_gap, layer, x, i, t);
+                        let gain: f32 = moves
+                            .iter()
+                            .map(|&(u, at)| straightness(g, x, u, at) - straightness(g, x, u, x[u]))
+                            .sum();
+                        let travel: f32 = moves.iter().map(|&(u, at)| (at - x[u]).abs()).sum();
+                        (gain, travel, moves)
+                    })
+                    .filter(|(gain, _, _)| *gain > MIN_GAIN)
+                    .max_by(|a, b| a.0.total_cmp(&b.0).then(b.1.total_cmp(&a.1)));
+                if let Some((_, _, moves)) = best {
+                    for (u, at) in moves {
+                        x[u] = at;
+                    }
+                    moved = true;
+                }
+            }
+        }
+        if !moved {
+            break;
+        }
+    }
+}
+
+/// The new positions of the vertices that move when `layer[i]` moves to
+/// `to`, with the vertices beyond it pushed along to keep their separation.
+fn pushed(
+    num_real: usize,
+    size_cross: &[f32],
+    node_gap: f32,
+    layer: &[usize],
+    x: &[f32],
+    i: usize,
+    to: f32,
+) -> Vec<(usize, f32)> {
+    let sep = |a: usize, b: usize| separation(num_real, size_cross, node_gap, a, b);
+    let mut moves = vec![(layer[i], to)];
+    let mut last = to;
+    if to > x[layer[i]] {
+        for pair in layer[i..].windows(2) {
+            let min = last + sep(pair[0], pair[1]);
+            if x[pair[1]] >= min {
+                break;
+            }
+            moves.push((pair[1], min));
+            last = min;
+        }
+    } else {
+        for pair in layer[..=i].windows(2).rev() {
+            let max = last - sep(pair[0], pair[1]);
+            if x[pair[0]] <= max {
+                break;
+            }
+            moves.push((pair[0], max));
+            last = max;
+        }
+    }
+    moves
+}
+
+/// The positions of `v` at which one of its segments runs straight, each
+/// with the weight of that segment. A segment of an edge in `n` segments
+/// weighs `1 / n`, so a long edge counts once, and only when all its
+/// segments run straight.
+fn targets<'a>(
+    g: &'a ProperGraph,
+    x: &'a [f32],
+    v: usize,
+) -> impl Iterator<Item = (f32, f32)> + 'a {
+    let weight = |s: usize| 1.0 / g.segments[s].chain as f32;
+    let back = g.back[v].iter().map(move |&s| {
+        let seg = &g.segments[s];
+        (x[seg.src] + seg.src_anchor - seg.dst_anchor, weight(s))
+    });
+    let fwd = g.fwd[v].iter().map(move |&s| {
+        let seg = &g.segments[s];
+        (x[seg.dst] + seg.dst_anchor - seg.src_anchor, weight(s))
+    });
+    back.chain(fwd)
+}
+
+/// The weight of the segments of `v` that run straight with `v` at `at`.
+/// See [`targets`].
+fn straightness(g: &ProperGraph, x: &[f32], v: usize, at: f32) -> f32 {
+    /// Offsets this small draw as a straight line.
+    const EPSILON: f32 = 0.01;
+    targets(g, x, v)
+        .filter(|(t, _)| (t - at).abs() < EPSILON)
+        .map(|(_, w)| w)
+        .sum()
 }
 
 /// Move `layer[i]` as close to `desired` as allowed, pushing strictly
@@ -221,7 +349,7 @@ mod tests {
         };
         let g = proper(&cg);
         let size_cross = padded_sizes(&g, &cg.size_cross);
-        let x = assign_cross(&g, &size_cross, 25.0);
+        let x = assign_cross(&g, &size_cross, 25.0, true);
         assert!((x[1] - x[0] - 20.0).abs() < 1e-3);
         assert!((x[2] - x[1] - 20.0).abs() < 1e-3);
     }
@@ -248,7 +376,7 @@ mod tests {
         let g = proper(&cg);
         let size_cross = padded_sizes(&g, &cg.size_cross);
         let node_gap = 25.0;
-        let x = assign_cross(&g, &size_cross, node_gap);
+        let x = assign_cross(&g, &size_cross, node_gap, true);
         for layer in &g.layers {
             for pair in layer.windows(2) {
                 let min_sep = separation(g.num_real, &size_cross, node_gap, pair[0], pair[1]);
