@@ -42,6 +42,8 @@ pub(super) struct Segment {
     pub(super) src_port: PortRank,
     /// The rank of the connection point among `dst`'s backward ports.
     pub(super) dst_port: PortRank,
+    /// The number of segments in the edge that this segment is a piece of.
+    pub(super) chain: usize,
 }
 
 /// A port's position among the distinct connection points on one side of a
@@ -104,16 +106,29 @@ pub(super) fn build_proper(cg: &CGraph, reversed: &[bool], layer: &[usize]) -> P
             ((edge.src, out_key), (edge.dst, in_key))
         };
         debug_assert!(layer_of[a] < layer_of[b]);
+        let chain = layer_of[b] - layer_of[a];
         let mut dummies = Vec::new();
         let mut prev = (a, Some(a_key));
         for l in layer_of[a] + 1..layer_of[b] {
             let dummy = layer_of.len();
             layer_of.push(l);
             dummies.push(dummy);
-            push_segment(&mut segments, &mut endpoint_keys, prev, (dummy, None));
+            push_segment(
+                &mut segments,
+                &mut endpoint_keys,
+                chain,
+                prev,
+                (dummy, None),
+            );
             prev = (dummy, None);
         }
-        push_segment(&mut segments, &mut endpoint_keys, prev, (b, Some(b_key)));
+        push_segment(
+            &mut segments,
+            &mut endpoint_keys,
+            chain,
+            prev,
+            (b, Some(b_key)),
+        );
         edge_dummies.push(dummies);
     }
 
@@ -227,6 +242,7 @@ pub(super) fn minimize_crossings(g: &mut ProperGraph) {
 fn push_segment(
     segments: &mut Vec<Segment>,
     endpoint_keys: &mut Vec<(Option<PortKey>, Option<PortKey>)>,
+    chain: usize,
     (src, src_key): (usize, Option<PortKey>),
     (dst, dst_key): (usize, Option<PortKey>),
 ) {
@@ -237,6 +253,7 @@ fn push_segment(
         dst_anchor: dst_key.map_or(0.0, |key| key.anchor),
         src_port: PortRank { index: 0, count: 1 },
         dst_port: PortRank { index: 0, count: 1 },
+        chain,
     });
     endpoint_keys.push((src_key, dst_key));
 }

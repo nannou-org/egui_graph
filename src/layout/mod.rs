@@ -48,6 +48,14 @@ pub struct LayoutParams {
     /// minimisation, matching classic node-size-only layered layouts.
     /// Defaults to `true`.
     pub socket_aware: bool,
+    /// Whether node placement favours straight edges.
+    ///
+    /// When `true`, a node lines up with one of the sockets it connects to
+    /// rather than with the midpoint between two, and a last pass moves nodes
+    /// to where more edges run straight. Layer order and node gaps hold either
+    /// way, so edges cross no more often and nodes never overlap. Defaults to
+    /// `false`.
+    pub straighten_edges: bool,
 }
 
 /// Corridor waypoints for edges, produced by [`layout_routed`] or
@@ -200,6 +208,7 @@ impl LayoutParams {
             node_gap: Self::DEFAULT_NODE_GAP,
             component_gap: Self::DEFAULT_COMPONENT_GAP,
             socket_aware: true,
+            straighten_edges: false,
         }
     }
 
@@ -224,6 +233,12 @@ impl LayoutParams {
     /// Set whether the layout accounts for the socket each edge connects to.
     pub fn socket_aware(mut self, socket_aware: bool) -> Self {
         self.socket_aware = socket_aware;
+        self
+    }
+
+    /// Set whether node placement favours straight edges.
+    pub fn straighten_edges(mut self, straighten: bool) -> Self {
+        self.straighten_edges = straighten;
         self
     }
 }
@@ -549,7 +564,12 @@ fn layout_connected(
     let mut size_cross_all = vec![0.0f32; num_v];
     size_main_all[..n].copy_from_slice(&cg.size_main);
     size_cross_all[..n].copy_from_slice(&cg.size_cross);
-    let cross = place::assign_cross(&pg, &size_cross_all, params.node_gap);
+    let cross = place::assign_cross(
+        &pg,
+        &size_cross_all,
+        params.node_gap,
+        params.straighten_edges,
+    );
     let main = place::assign_main(&pg, &size_main_all, params.layer_gap);
 
     let centers: Vec<(f32, f32)> = (0..n).map(|v| (main[v], cross[v])).collect();
@@ -1621,5 +1641,79 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The number of edges whose sockets line up across the flow, in a
+    /// top-down layout of nodes with `sockets` evenly spaced sockets a side.
+    fn straight_edges(
+        nodes: &[(NodeId, egui::Vec2)],
+        edges: &[((NodeId, usize), (NodeId, usize))],
+        sockets: usize,
+        padding: f32,
+        l: &Layout,
+    ) -> usize {
+        let size: HashMap<NodeId, egui::Vec2> = nodes.iter().copied().collect();
+        let socket_x = |id: NodeId, ix: usize| {
+            let mut offsets =
+                crate::socket::layout::evenly_spaced_cross_offsets(sockets, size[&id].x, padding);
+            l[&id].x + offsets.nth(ix).unwrap_or(size[&id].x * 0.5)
+        };
+        edges
+            .iter()
+            .filter(|&&((a, out), (b, inp))| {
+                a != b && (socket_x(a, out) - socket_x(b, inp)).abs() < 0.5
+            })
+            .count()
+    }
+
+    #[test]
+    fn diamond_runs_straight_through_one_side() {
+        // A bang fanning out to two nodes that feed one node's two inputs.
+        // The bang, the left node and the join line up their first sockets,
+        // which all sit at the padding.
+        let size = egui::Vec2::new(100.0, 30.0);
+        let nodes = (0..4).map(|v| {
+            let inputs = if v == 3 { 2 } else { 1 };
+            let node = LayoutNode::new(size)
+                .socket_padding(10.0)
+                .inputs(inputs)
+                .outputs(1);
+            (nid(v), node)
+        });
+        let edges = vec![
+            ((nid(0), 0), (nid(1), 0)),
+            ((nid(0), 0), (nid(2), 0)),
+            ((nid(1), 0), (nid(3), 0)),
+            ((nid(2), 0), (nid(3), 1)),
+        ];
+        let params = LayoutParams::new(egui::Direction::TopDown).straighten_edges(true);
+        let l = layout(nodes, edges, params);
+        let column = l[&nid(1)].x;
+        assert!((l[&nid(0)].x - column).abs() < 1e-3);
+        assert!((l[&nid(3)].x - column).abs() < 1e-3);
+    }
+
+    #[test]
+    fn straightening_lines_up_more_sockets() {
+        let count = |straighten| {
+            (0..50)
+                .map(|seed| {
+                    let (nodes, edges) = random_graph(seed);
+                    let layout_nodes = nodes.iter().map(|&(id, size)| {
+                        let node = LayoutNode::new(size)
+                            .socket_padding(8.0)
+                            .inputs(4)
+                            .outputs(4);
+                        (id, node)
+                    });
+                    let params =
+                        LayoutParams::new(egui::Direction::TopDown).straighten_edges(straighten);
+                    let l = layout(layout_nodes, edges.clone(), params);
+                    straight_edges(&nodes, &edges, 4, 8.0, &l)
+                })
+                .sum::<usize>()
+        };
+        let (before, after) = (count(false), count(true));
+        assert!(after > before, "{after} straight edges, {before} without");
     }
 }

@@ -49,6 +49,9 @@ struct State {
     /// when off it behaves like a classic node-size-only layered layout.
     #[cfg(feature = "layout")]
     socket_aware: bool,
+    /// Whether the layout favours straight edges.
+    #[cfg(feature = "layout")]
+    straighten_edges: bool,
     /// Whether edges route around nodes (via the auto-layout's corridors, or
     /// best-effort against the current positions in freehand mode).
     #[cfg(feature = "layout")]
@@ -132,6 +135,8 @@ impl App {
             auto_layout: true,
             #[cfg(feature = "layout")]
             socket_aware: true,
+            #[cfg(feature = "layout")]
+            straighten_edges: false,
             #[cfg(feature = "layout")]
             route_edges: false,
             #[cfg(feature = "layout")]
@@ -302,7 +307,8 @@ fn layout(state: &State, ctx: &egui::Context) -> (egui_graph::Layout, egui_graph
     let params = egui_graph::LayoutParams::new(state.flow)
         .layer_gap(state.layer_gap)
         .node_gap(state.node_gap)
-        .socket_aware(state.socket_aware);
+        .socket_aware(state.socket_aware)
+        .straighten_edges(state.straighten_edges);
     egui_graph::layout_routed(
         layout_nodes(&state.graph, ctx, state.flow),
         socket_edges(&state.graph),
@@ -589,6 +595,8 @@ fn graph_config(ui: &mut egui::Ui, view: &mut egui_graph::View, state: &mut Stat
             });
             #[cfg(feature = "layout")]
             ui.checkbox(&mut state.socket_aware, "Socket-Aware Layout");
+            #[cfg(feature = "layout")]
+            ui.checkbox(&mut state.straighten_edges, "Straighten Edges");
             // With auto-layout the routes follow the layout's corridors;
             // in freehand mode they dodge nodes best-effort.
             #[cfg(feature = "layout")]
