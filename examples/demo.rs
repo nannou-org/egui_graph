@@ -12,7 +12,7 @@ fn main() -> Result<(), eframe::Error> {
     // platforms (notably Wayland). `AutoNoVsync` prefers `Mailbox` for
     // low-latency, tear-free presentation and falls back to `Immediate` where
     // Mailbox is unavailable, so it stays robust across surfaces.
-    options.wgpu_options.present_mode = eframe::wgpu::PresentMode::AutoNoVsync;
+    options.wgpu_options.surface.present_mode = eframe::wgpu::PresentMode::AutoNoVsync;
     let name = "`egui_graph` demo";
     eframe::run_native(name, options, Box::new(|cc| Ok(Box::new(App::new(cc)))))
 }
@@ -331,7 +331,7 @@ fn freehand_routes(
 fn gui(ui: &mut egui::Ui, view: &mut egui_graph::View, state: &mut State) {
     egui::containers::CentralPanel::default()
         .frame(egui::Frame::default())
-        .show_inside(ui, |ui| {
+        .show(ui, |ui| {
             graph_config(ui, view, state);
             graph(ui, view, state);
         });

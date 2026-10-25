@@ -416,7 +416,7 @@ impl Graph {
     pub const DEFAULT_ALIGN_GUIDE_STROKE: Option<egui::Stroke> = None;
 
     /// Begin building the new graph widget.
-    pub fn new(id_src: impl Hash) -> Self {
+    pub fn new(id_src: impl egui::AsId) -> Self {
         Self::from_id(id(id_src))
     }
 
@@ -1607,7 +1607,7 @@ fn paint_selection_area(sel_rect: egui::Rect, graph_id: egui::Id, ui: &egui::Ui)
 }
 
 /// Combines the given id src with the `TypeId` of the `Graph` to produce a unique `egui::Id`.
-pub fn id(id_src: impl Hash) -> egui::Id {
+pub fn id(id_src: impl egui::AsId) -> egui::Id {
     egui::Id::new((std::any::TypeId::of::<Graph>(), id_src))
 }
 
@@ -2627,7 +2627,7 @@ mod tests {
                     events,
                     ..Default::default()
                 };
-                ctx.run_ui(input, |ui| {
+                let mut output = ctx.run_ui(input, |ui| {
                     Graph::new("graph").show(&mut view, ui, |ui, show| {
                         show.nodes(ui, |nctx, ui| {
                             for id in [NodeId(0), NodeId(1)] {
@@ -2641,8 +2641,9 @@ mod tests {
                             .fixed_pos(egui::pos2(200.0, 150.0))
                             .show(ui.ctx(), |ui| ui.label("window"));
                     }
-                })
-                .shapes
+                });
+                output.textures_delta.clear();
+                output.shapes
             };
             pass(vec![egui::Event::PointerMoved(START)]);
             pass(vec![]);
@@ -2748,25 +2749,28 @@ mod tests {
             };
             let mut seen = None;
             let mut nodes_moved = false;
-            let _ = g.ctx.run_ui(input, |ui| {
-                let graph = Graph::new(GRAPH).snap(None);
-                let resp = graph.show(&mut g.view, ui, |ui, show| {
-                    let mut a = None;
-                    show.nodes(ui, |nctx, ui| {
-                        let node = Node::from_id(A);
-                        a = Some(node.show(nctx, ui, |c| c.framed(|ui, _| ui.label("x"))));
+            g.ctx
+                .run_ui(input, |ui| {
+                    let graph = Graph::new(GRAPH).snap(None);
+                    let resp = graph.show(&mut g.view, ui, |ui, show| {
+                        let mut a = None;
+                        show.nodes(ui, |nctx, ui| {
+                            let node = Node::from_id(A);
+                            a = Some(node.show(nctx, ui, |c| c.framed(|ui, _| ui.label("x"))));
+                        });
+                        let a = a.expect("the node ran");
+                        let ctx = ui.ctx();
+                        let to_screen = ctx.layer_transform_to_global(ui.layer_id());
+                        let to_screen = to_screen.unwrap_or_default();
+                        let ptr = ui.input(|i| i.pointer.latest_pos());
+                        let ptr = ptr.map(|p| to_screen.inverse().mul_pos(p));
+                        let grip = a.rect.min + Vec2::splat(2.0);
+                        seen = Some((to_screen.mul_pos(grip), ptr));
                     });
-                    let a = a.expect("the node ran");
-                    let ctx = ui.ctx();
-                    let to_screen = ctx.layer_transform_to_global(ui.layer_id());
-                    let to_screen = to_screen.unwrap_or_default();
-                    let ptr = ui.input(|i| i.pointer.latest_pos());
-                    let ptr = ptr.map(|p| to_screen.inverse().mul_pos(p));
-                    let grip = a.rect.min + Vec2::splat(2.0);
-                    seen = Some((to_screen.mul_pos(grip), ptr));
-                });
-                nodes_moved = resp.nodes_moved;
-            });
+                    nodes_moved = resp.nodes_moved;
+                })
+                .textures_delta
+                .clear();
             let (a_grip, ptr) = seen.expect("the graph ran");
             Pass {
                 scene_rect: g.view.scene_rect,

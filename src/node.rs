@@ -964,7 +964,7 @@ mod tests {
         let mut out = None;
         // Two passes, since fonts and sizes settle after the first.
         for _ in 0..2 {
-            let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            ctx.run_ui(egui::RawInput::default(), |ui| {
                 let res = Node::from_id(NodeId(0))
                     .inputs(2)
                     .outputs(1)
@@ -979,7 +979,9 @@ mod tests {
                     .map(|(_, r)| r.rect.center())
                     .collect();
                 out = Some((rect, inputs, outputs));
-            });
+            })
+            .textures_delta
+            .clear();
         }
         let (rect, inputs, outputs) = out.expect("the panel ran");
         assert_eq!(inputs.len(), 2);
@@ -997,7 +999,7 @@ mod tests {
         let ctx = egui::Context::default();
         let mut view = crate::View::default();
         let mut enabled = None;
-        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+        ctx.run_ui(egui::RawInput::default(), |ui| {
             crate::Graph::from_id(egui::Id::new("graph"))
                 .immutable(immutable)
                 .show(&mut view, ui, |ui, show| {
@@ -1009,7 +1011,9 @@ mod tests {
                             });
                     });
                 });
-        });
+        })
+        .textures_delta
+        .clear();
         enabled.expect("the node content ran")
     }
 
@@ -1032,11 +1036,13 @@ mod tests {
         // A static node follows the flag too.
         let ctx = egui::Context::default();
         let mut enabled = None;
-        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+        ctx.run_ui(egui::RawInput::default(), |ui| {
             Node::from_id(NodeId(0))
                 .content_enabled(false)
                 .show_static(ui, |c| c.framed(|ui, _| enabled = Some(ui.is_enabled())));
-        });
+        })
+        .textures_delta
+        .clear();
         assert_eq!(enabled, Some(false));
     }
 
@@ -1049,7 +1055,7 @@ mod tests {
         let mut min = None;
         for x in [0.0, 0.0, 100.0] {
             view.layout.insert(NodeId(0), egui::pos2(x, 0.0));
-            let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            ctx.run_ui(egui::RawInput::default(), |ui| {
                 crate::Graph::from_id(egui::Id::new("graph")).show(&mut view, ui, |ui, show| {
                     show.nodes(ui, |nctx, ui| {
                         let res =
@@ -1059,7 +1065,9 @@ mod tests {
                         min = Some(res.rect.min);
                     });
                 });
-            });
+            })
+            .textures_delta
+            .clear();
         }
         assert_eq!(min, Some(egui::pos2(100.0, 0.0)));
     }
@@ -1151,43 +1159,46 @@ mod tests {
             let cull = g.cull;
             let selected = g.selected.clone();
             let mut out = None;
-            let _ = g.ctx.run_ui(input, |ui| {
-                let graph = crate::Graph::new("graph").selected_nodes(selected.clone());
-                graph.show(&mut g.view, ui, |ui, show| {
-                    let mut nodes = None;
-                    let mut a_out = None;
-                    show.nodes(ui, |nctx, ui| {
-                        let mut a_ran = false;
-                        let a = Node::from_id(A).outputs(1).animation_time(0.0);
-                        let content = |c: NodeCtx| {
-                            a_ran = true;
-                            c.framed(|ui, _| ui.label("a"))
-                        };
-                        let (a_rect, a_out_response, a_removed) = if cull {
-                            let r = a.show_or_cull(nctx, ui, content);
-                            (r.rect, r.sockets().output(0).is_some(), r.removed())
-                        } else {
-                            let r = a.show(nctx, ui, content);
-                            (r.rect, r.sockets().output(0).is_some(), r.removed())
-                        };
-                        let mut b_content_id = None;
-                        Node::from_id(B)
-                            .inputs(1)
-                            .show(nctx, ui, |c| c.framed(|ui, _| b_content_id = Some(ui.id())));
-                        nodes = Some(Pass {
-                            a_ran,
-                            a_rect,
-                            a_out: None,
-                            a_out_response,
-                            a_removed,
-                            b_content_id: b_content_id.expect("B ran"),
-                        });
-                    })
-                    .edges(ui, |ectx, ui| a_out = Some(ectx.output(ui, A, 0)));
-                    let a_out = a_out.expect("the edges ran");
-                    out = nodes.map(|p| Pass { a_out, ..p });
-                });
-            });
+            g.ctx
+                .run_ui(input, |ui| {
+                    let graph = crate::Graph::new("graph").selected_nodes(selected.clone());
+                    graph.show(&mut g.view, ui, |ui, show| {
+                        let mut nodes = None;
+                        let mut a_out = None;
+                        show.nodes(ui, |nctx, ui| {
+                            let mut a_ran = false;
+                            let a = Node::from_id(A).outputs(1).animation_time(0.0);
+                            let content = |c: NodeCtx| {
+                                a_ran = true;
+                                c.framed(|ui, _| ui.label("a"))
+                            };
+                            let (a_rect, a_out_response, a_removed) = if cull {
+                                let r = a.show_or_cull(nctx, ui, content);
+                                (r.rect, r.sockets().output(0).is_some(), r.removed())
+                            } else {
+                                let r = a.show(nctx, ui, content);
+                                (r.rect, r.sockets().output(0).is_some(), r.removed())
+                            };
+                            let mut b_content_id = None;
+                            Node::from_id(B)
+                                .inputs(1)
+                                .show(nctx, ui, |c| c.framed(|ui, _| b_content_id = Some(ui.id())));
+                            nodes = Some(Pass {
+                                a_ran,
+                                a_rect,
+                                a_out: None,
+                                a_out_response,
+                                a_removed,
+                                b_content_id: b_content_id.expect("B ran"),
+                            });
+                        })
+                        .edges(ui, |ectx, ui| a_out = Some(ectx.output(ui, A, 0)));
+                        let a_out = a_out.expect("the edges ran");
+                        out = nodes.map(|p| Pass { a_out, ..p });
+                    });
+                })
+                .textures_delta
+                .clear();
             out.expect("the graph ran")
         }
 

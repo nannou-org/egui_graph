@@ -303,41 +303,44 @@ mod tests {
         };
         let b_inputs = g.b_inputs;
         let mut out = None;
-        let _ = g.ctx.run_ui(input, |ui| {
-            let graph = Graph::new(GRAPH).immutable(g.immutable);
-            graph.show(&mut g.view, ui, |ui, show| {
-                let mut nodes = None;
-                let mut sockets = None;
-                show.nodes(ui, |nctx, ui| {
-                    let mut node = |id, inputs, outputs| {
-                        let node = Node::from_id(id).inputs(inputs).outputs(outputs);
-                        node.show(nctx, ui, |c| c.framed(|ui, _| ui.label("x")))
-                    };
-                    nodes = Some((node(A, 0, 1), b_inputs.map(|n| node(B, n, 0))));
-                })
-                .edges(ui, |ectx, ui| {
-                    sockets = Some((ectx.output(ui, A, 0), ectx.input(ui, B, 0)));
+        g.ctx
+            .run_ui(input, |ui| {
+                let graph = Graph::new(GRAPH).immutable(g.immutable);
+                graph.show(&mut g.view, ui, |ui, show| {
+                    let mut nodes = None;
+                    let mut sockets = None;
+                    show.nodes(ui, |nctx, ui| {
+                        let mut node = |id, inputs, outputs| {
+                            let node = Node::from_id(id).inputs(inputs).outputs(outputs);
+                            node.show(nctx, ui, |c| c.framed(|ui, _| ui.label("x")))
+                        };
+                        nodes = Some((node(A, 0, 1), b_inputs.map(|n| node(B, n, 0))));
+                    })
+                    .edges(ui, |ectx, ui| {
+                        sockets = Some((ectx.output(ui, A, 0), ectx.input(ui, B, 0)));
+                    });
+                    let (a, b) = nodes.expect("the nodes ran");
+                    let (a_out, b_in) = sockets.expect("the edges ran");
+                    let to_screen = ui
+                        .ctx()
+                        .layer_transform_to_global(ui.layer_id())
+                        .unwrap_or_default();
+                    let screen = |(pos, normal)| (to_screen.mul_pos(pos), normal);
+                    let gmem_arc = crate::memory(ui, crate::id(GRAPH));
+                    let gmem = gmem_arc.lock().expect("failed to lock graph temp memory");
+                    let b_in_response = b.as_ref().and_then(|b| b.sockets().input(0));
+                    out = Some(Pass {
+                        a_out: screen(a_out.expect("A has an output")),
+                        b_in: b_in.map(screen),
+                        closest_socket: gmem.closest_socket,
+                        b_in_hovered: b_in_response.is_some_and(|r| r.hovered()),
+                        a_edge_event: a.edge_event(),
+                        b_edge_event: b.and_then(|b| b.edge_event()),
+                    });
                 });
-                let (a, b) = nodes.expect("the nodes ran");
-                let (a_out, b_in) = sockets.expect("the edges ran");
-                let to_screen = ui
-                    .ctx()
-                    .layer_transform_to_global(ui.layer_id())
-                    .unwrap_or_default();
-                let screen = |(pos, normal)| (to_screen.mul_pos(pos), normal);
-                let gmem_arc = crate::memory(ui, crate::id(GRAPH));
-                let gmem = gmem_arc.lock().expect("failed to lock graph temp memory");
-                let b_in_response = b.as_ref().and_then(|b| b.sockets().input(0));
-                out = Some(Pass {
-                    a_out: screen(a_out.expect("A has an output")),
-                    b_in: b_in.map(screen),
-                    closest_socket: gmem.closest_socket,
-                    b_in_hovered: b_in_response.is_some_and(|r| r.hovered()),
-                    a_edge_event: a.edge_event(),
-                    b_edge_event: b.and_then(|b| b.edge_event()),
-                });
-            });
-        });
+            })
+            .textures_delta
+            .clear();
         out.expect("the graph ran")
     }
 

@@ -490,7 +490,7 @@ mod tests {
                 events: vec![egui::Event::PointerMoved(pointer)],
                 ..Default::default()
             };
-            let _ = ctx.run_ui(input, |ui| {
+            ctx.run_ui(input, |ui| {
                 Graph::new("graph").show(&mut view, ui, |ui, show| {
                     show.nodes(ui, |nctx, ui| {
                         for (id, inputs, outputs) in [(A, 0, 1), (B, 1, 0)] {
@@ -511,7 +511,9 @@ mod tests {
                         });
                     });
                 });
-            });
+            })
+            .textures_delta
+            .clear();
         }
         out.expect("the edges ran")
     }
@@ -526,11 +528,13 @@ mod tests {
     fn node_height() -> f32 {
         let ctx = egui::Context::default();
         let mut height = None;
-        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+        ctx.run_ui(egui::RawInput::default(), |ui| {
             let node = Node::from_id(A).outputs(1);
             let r = node.show_static(ui, |c| c.framed(|ui, _| ui.label("x")));
             height = Some(r.inner.response.rect.height());
-        });
+        })
+        .textures_delta
+        .clear();
         height.expect("the node ran")
     }
 
